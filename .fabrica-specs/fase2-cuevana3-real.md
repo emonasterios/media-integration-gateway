@@ -76,17 +76,7 @@ Crear `tests/test_cuevana3.py` con HTML mock de:
 
 ## ACEPTACION
 cd /home/emon/media-integration-gateway && . .venv/bin/activate && pytest tests/ -v
-cd /home/emon/media-integration-gateway && . .venv/bin/activate && python -c "
-from src.adapters.cuevana3 import Cuevana3Adapter
-import asyncio
-async def test():
-    a = Cuevana3Adapter()
-    r = await a.search('Signal')
-    print(f'Search: {len(r.items)} items')
-    assert len(r.items) > 0, 'No se encontraron resultados'
-    await a.close()
-asyncio.run(test())
-"
+cd /home/emon/media-integration-gateway && . .venv/bin/activate && python scripts/accept_cuevana3.py
 
 ## PREMISES
 - src/adapters/cuevana3.py:1 — adapter actual con selectores incorrectos (.item, .poster, article)
