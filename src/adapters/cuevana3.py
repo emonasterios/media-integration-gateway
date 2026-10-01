@@ -5,6 +5,7 @@ Extrae películas y series del sitio mediante scraping HTTP + BeautifulSoup.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Optional
 from urllib.parse import urljoin
@@ -23,6 +24,8 @@ from src.models.catalog import (
 )
 
 BASE_URL = "https://cuevana3i.cc"
+
+logger = logging.getLogger(__name__)
 
 
 class Cuevana3Adapter(MediaProvider):
@@ -53,29 +56,40 @@ class Cuevana3Adapter(MediaProvider):
     # ------------------------------------------------------------------
     async def search(self, query: str) -> SearchResult:
         """Busca en /buscar/?q=... y devuelve resultados normalizados."""
-        resp = await self._client.get("/buscar/", params={"q": query})
-        resp.raise_for_status()
+        try:
+            resp = await self._client.get("/buscar/", params={"q": query})
+            resp.raise_for_status()
+        except httpx.TimeoutException:
+            logger.warning("Timeout buscando %s en cuevana3", query)
+            return SearchResult(items=[], total=0, query=query)
+        except httpx.HTTPError as e:
+            logger.warning("Error HTTP buscando %s: %s", query, e)
+            return SearchResult(items=[], total=0, query=query)
+
         soup = BeautifulSoup(resp.text, "lxml")
 
         items: list[MediaItem] = []
-        for card in soup.select(".item, .poster, article"):
-            link = card.find("a", href=True)
+        for post in soup.select("div.TPost"):
+            link = post.find("a", href=True)
             if not link:
                 continue
             href = link["href"]
-            title_el = card.find("h2") or card.find("h3") or card.find("a")
-            title = title_el.get_text(strip=True) if title_el else link.get_text(strip=True)
+
+            # Título y año: texto del link o elemento interno
+            title_text = link.get_text(strip=True)
+            title, year = self._parse_title_and_year(title_text)
+
+            # Imagen: figure.Objf img
+            img_el = post.select_one("figure.Objf img") or post.find("img")
+            poster_url = None
+            if img_el and img_el.get("src"):
+                src = img_el["src"]
+                if not src.startswith("data:"):  # ignorar placeholders SVG
+                    poster_url = urljoin(self._base, src) if not src.startswith("http") else src
 
             # Determinar tipo por URL
             media_type = MediaType.SERIES if "/serie/" in href else MediaType.MOVIE
             provider_id = self._slug_from_url(href)
-
-            # Año y rating opcionales
-            year = self._extract_year(card)
-            overview_el = card.find("p") or card.find("div", class_="description")
-            overview = overview_el.get_text(strip=True) if overview_el else None
-            poster_el = card.find("img")
-            poster_url = poster_el.get("src") if poster_el else None
 
             items.append(
                 MediaItem(
@@ -84,7 +98,7 @@ class Cuevana3Adapter(MediaProvider):
                     media_type=media_type,
                     year=year,
                     poster_url=poster_url,
-                    overview=overview,
+                    overview=None,
                     provider=self.name,
                     provider_id=provider_id,
                 )
@@ -93,26 +107,97 @@ class Cuevana3Adapter(MediaProvider):
         return SearchResult(items=items, total=len(items), query=query)
 
     # ------------------------------------------------------------------
+    # Catálogo
+    # ------------------------------------------------------------------
+    async def get_catalog(self, category: Optional[str] = None) -> list[MediaItem]:
+        """Lista películas o series recientes."""
+        path = "/peliculas/" if not category else f"/genero/{category}/"
+        try:
+            resp = await self._client.get(path)
+            resp.raise_for_status()
+        except httpx.TimeoutException:
+            logger.warning("Timeout en catálogo %s", path)
+            return []
+        except httpx.HTTPError as e:
+            logger.warning("Error HTTP en catálogo %s: %s", path, e)
+            return []
+
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        items: list[MediaItem] = []
+        for post in soup.select("div.TPost"):
+            link = post.find("a", href=True)
+            if not link:
+                continue
+
+            title_text = link.get_text(strip=True)
+            title, year = self._parse_title_and_year(title_text)
+
+            img_el = post.select_one("figure.Objf img") or post.find("img")
+            poster_url = None
+            if img_el and img_el.get("src"):
+                src = img_el["src"]
+                if not src.startswith("data:"):
+                    poster_url = urljoin(self._base, src) if not src.startswith("http") else src
+
+            provider_id = self._slug_from_url(link["href"])
+            # Determinar tipo por URL
+            media_type = MediaType.SERIES if "/serie/" in link["href"] else MediaType.MOVIE
+
+            items.append(
+                MediaItem(
+                    media_id=f"cuevana3:{provider_id}",
+                    title=title,
+                    media_type=media_type,
+                    year=year,
+                    poster_url=poster_url,
+                    overview=None,
+                    provider=self.name,
+                    provider_id=provider_id,
+                )
+            )
+
+        return items
+
+    # ------------------------------------------------------------------
     # Detalles
     # ------------------------------------------------------------------
     async def get_details(self, media_id: str) -> MediaItem:
-        slug = media_id.replace("cuevana3:", "")
-        is_series = "/serie/" in media_id or self._is_series_slug(slug)
-        path = f"/serie/{slug}/" if is_series else f"/pelicula/{slug}/"
+        slug = media_id.removeprefix("cuevana3:")
+        html = None
+        media_type = MediaType.MOVIE
 
-        resp = await self._client.get(path)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
+        for prefix, mtype in (("pelicula", MediaType.MOVIE), ("serie", MediaType.SERIES)):
+            try:
+                resp = await self._client.get(f"/{prefix}/{slug}/")
+                if resp.status_code == 200:
+                    html = resp.text
+                    media_type = mtype
+                    break
+            except (httpx.RequestError, httpx.HTTPError):
+                continue
 
+        if html is None:
+            raise ValueError(f"Timeout accediendo a {media_id}")
+
+        soup = BeautifulSoup(html, "lxml")
+
+        # Título: article h1 o h2
         title = self._extract_title(soup)
-        year = self._extract_year(soup)
+
+        # Sinopsis: primer p del article
         overview = self._extract_overview(soup)
+
+        # Año: buscar patrón \b(19|20)\d{2}\b en sectionfooter
+        year = self._extract_year(soup)
+
+        # Poster: meta og:image primero, luego article figure img
         poster = self._extract_poster(soup)
 
         return MediaItem(
             media_id=f"cuevana3:{slug}",
             title=title or slug,
-            media_type=MediaType.SERIES if is_series else MediaType.MOVIE,
+            media_type=media_type,
             year=year,
             poster_url=poster,
             overview=overview,
@@ -130,14 +215,31 @@ class Cuevana3Adapter(MediaProvider):
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "lxml")
 
-        # Buscar selectores de temporada o listas de capítulos
         seasons: list[Season] = []
-        season_select = soup.find("select", id="season") or soup.find("select")
+        # Buscar selector de temporada (suelen ser select o lista de temporadas)
+        season_select = soup.find("select", id="season") or soup.find("select", class_=re.compile(r"season"))
         if season_select:
             for opt in season_select.find_all("option"):
-                num = int(opt.get("value", 1))
+                try:
+                    num = int(opt.get("value", 1))
+                except ValueError:
+                    num = 1
                 seasons.append(Season(season_number=num, title=opt.get_text(strip=True)))
         else:
+            # Buscar enlaces de temporadas en la página
+            season_links = soup.select("a[href*='temporada-']")
+            if season_links:
+                seen = set()
+                for link in season_links:
+                    m = re.search(r"temporada-(\d+)", link.get("href", ""))
+                    if m:
+                        num = int(m.group(1))
+                        if num not in seen:
+                            seen.add(num)
+                            seasons.append(Season(season_number=num, title=f"Temporada {num}"))
+                seasons.sort(key=lambda s: s.season_number)
+
+        if not seasons:
             # Si no hay selector, asumir temporada única
             episodes = self._count_episodes(soup)
             seasons.append(Season(season_number=1, episode_count=episodes))
@@ -153,16 +255,16 @@ class Cuevana3Adapter(MediaProvider):
         soup = BeautifulSoup(resp.text, "lxml")
 
         episodes: list[Episode] = []
-        # Buscar enlaces de episodios
-        for i, ep_link in enumerate(
-            soup.select(".episodes a, .capitulos a, .item a"), 1
-        ):
+        # Buscar enlaces de episodios: patrón /serie/{slug}/temporada-{N}-capitulo-{M}/
+        ep_links = soup.select(f"a[href*='temporada-{season_number}-capitulo-']")
+        for i, ep_link in enumerate(ep_links, 1):
             ep_slug = self._slug_from_url(ep_link.get("href", ""))
+            ep_title = ep_link.get_text(strip=True) or f"Episodio {i}"
             episodes.append(
                 Episode(
                     episode_number=i,
                     season_number=season_number,
-                    title=ep_link.get_text(strip=True) or f"Episodio {i}",
+                    title=ep_title,
                     provider_id=ep_slug or f"ep-{i}",
                     provider=self.name,
                 )
@@ -174,76 +276,70 @@ class Cuevana3Adapter(MediaProvider):
     # Resolución de reproducción
     # ------------------------------------------------------------------
     async def resolve_playback(self, media_id: str) -> PlaybackDescriptor:
-        """Navega a la página del título y extrae el iframe/embed del reproductor."""
-        slug = media_id.replace("cuevana3:", "")
-        is_series = "/serie/" in media_id or self._is_series_slug(slug)
-        path = f"/serie/{slug}/" if is_series else f"/pelicula/{slug}/"
+        """Navega a la página del título y extrae URLs de servidores (Doodstream, Voe, Vidhide)."""
+        slug = media_id.removeprefix("cuevana3:")
+        html = None
 
-        resp = await self._client.get(path)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
+        for prefix in ("pelicula", "serie"):
+            try:
+                resp = await self._client.get(f"/{prefix}/{slug}/")
+                if resp.status_code == 200:
+                    html = resp.text
+                    break
+            except (httpx.RequestError, httpx.HTTPError):
+                continue
 
-        # Buscar iframe de video
+        if html is None:
+            raise ValueError(f"Timeout resolviendo reproducción para {media_id}")
+
+        soup = BeautifulSoup(html, "lxml")
+
+        # 1. Buscar iframes directamente en el HTML (a veces ya están cargados)
         iframe = soup.find("iframe", src=True)
-        if not iframe:
-            iframe = soup.find("source", src=True)
-
         if iframe and iframe.get("src"):
-            embed_url = iframe["src"]
-            if not embed_url.startswith("http"):
-                embed_url = urljoin(self._base, embed_url)
-            return PlaybackDescriptor(
-                protocol="hls" if ".m3u8" in embed_url else "mp4",
-                url=embed_url,
-                headers={"Referer": self._base},
-            )
+            src = iframe["src"]
+            if not src.startswith("http"):
+                src = urljoin(self._base, src)
+            if self._is_known_server(src):
+                return PlaybackDescriptor(
+                    protocol="embed",
+                    url=src,
+                    headers={"Referer": self._base},
+                )
 
-        # Fallback: buscar enlaces de servidores (filemoon, doodstream, etc.)
-        server_links = soup.select(".server a, .options a, .btn-play")
-        if server_links:
+        # 2. Buscar servidores en la lista ul/li con data-mdl o data-url
+        server_url = self._extract_server_from_list(soup)
+        if server_url:
             return PlaybackDescriptor(
                 protocol="embed",
-                url=urljoin(self._base, server_links[0].get("href", path)),
+                url=server_url,
                 headers={"Referer": self._base},
             )
 
+        # 3. Buscar en scripts inline (data-url, onclick, etc.)
+        server_url = self._extract_server_from_scripts(soup)
+        if server_url:
+            return PlaybackDescriptor(
+                protocol="embed",
+                url=server_url,
+                headers={"Referer": self._base},
+            )
+
+        # 4. Fallback: buscar cualquier enlace a servidor conocido
+        for link in soup.find_all("a", href=True):
+            href = link["href"]
+            if self._is_known_server(href):
+                return PlaybackDescriptor(
+                    protocol="embed",
+                    url=urljoin(self._base, href) if not href.startswith("http") else href,
+                    headers={"Referer": self._base},
+                )
+
+        logger.debug("No se encontró fuente de reproducción para %s. HTML: %s", media_id, soup.prettify()[:2000])
         raise ValueError(f"No se encontró fuente de reproducción para {media_id}")
 
     # ------------------------------------------------------------------
-    # Catálogo
-    # ------------------------------------------------------------------
-    async def get_catalog(self, category: Optional[str] = None) -> list[MediaItem]:
-        """Lista películas o series recientes."""
-        path = "/peliculas/" if not category else f"/genero/{category}/"
-        resp = await self._client.get(path)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        items: list[MediaItem] = []
-        for card in soup.select(".item, .poster, article"):
-            link = card.find("a", href=True)
-            if not link:
-                continue
-            title_el = card.find("h2") or card.find("h3") or card.find("a")
-            title = title_el.get_text(strip=True) if title_el else link.get_text(strip=True)
-            provider_id = self._slug_from_url(link["href"])
-            poster_el = card.find("img")
-
-            items.append(
-                MediaItem(
-                    media_id=f"cuevana3:{provider_id}",
-                    title=title,
-                    media_type=MediaType.MOVIE,
-                    poster_url=poster_el.get("src") if poster_el else None,
-                    provider=self.name,
-                    provider_id=provider_id,
-                )
-            )
-
-        return items
-
-    # ------------------------------------------------------------------
-    # Helpers
+    # Helpers de extracción
     # ------------------------------------------------------------------
     @staticmethod
     def _slug_from_url(url: str) -> str:
@@ -255,13 +351,25 @@ class Cuevana3Adapter(MediaProvider):
         return False  # se determina por contexto de URL
 
     @staticmethod
-    def _extract_year(soup) -> Optional[int]:
-        text = soup.get_text()
-        match = re.search(r"\b(19|20)\d{2}\b", text)
-        return int(match.group()) if match else None
+    def _parse_title_and_year(text: str) -> tuple[str, Optional[int]]:
+        """Extrae título y año del texto combinado (ej: '2024 The Movie')."""
+        year_match = re.search(r"\b(19|20)\d{2}\b", text)
+        year = int(year_match.group()) if year_match else None
+        # Quitar el año del título si está al principio
+        title = re.sub(r"^\s*\b(19|20)\d{2}\b\s*", "", text).strip()
+        return title, year
 
     @staticmethod
     def _extract_title(soup) -> Optional[str]:
+        article = soup.find("article")
+        if article:
+            h1 = article.find("h1")
+            if h1:
+                return h1.get_text(strip=True)
+            h2 = article.find("h2")
+            if h2:
+                return h2.get_text(strip=True)
+        # Fallback: h1 en cualquier parte
         h1 = soup.find("h1")
         if h1:
             return h1.get_text(strip=True)
@@ -270,25 +378,100 @@ class Cuevana3Adapter(MediaProvider):
 
     @staticmethod
     def _extract_overview(soup) -> Optional[str]:
-        for sel in [".description", ".synopsis", ".info", "meta[name='description']"]:
-            el = soup.select_one(sel)
-            if el:
-                text = el.get("content") or el.get_text(strip=True)
-                if text:
-                    return text
+        article = soup.find("article")
+        if article:
+            p = article.find("p")
+            if p:
+                return p.get_text(strip=True)
+        # Fallback: meta description
+        meta = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", property="og:description")
+        if meta and meta.get("content"):
+            return meta["content"].strip()
         return None
 
     @staticmethod
+    def _extract_year(soup) -> Optional[int]:
+        # Primero buscar en sectionfooter
+        footer = soup.select_one("sectionfooter") or soup.find(class_=re.compile(r"sectionfooter"))
+        if footer:
+            text = footer.get_text()
+            match = re.search(r"\b(19|20)\d{2}\b", text)
+            if match:
+                return int(match.group())
+        # Fallback: buscar en todo el article
+        article = soup.find("article")
+        if article:
+            text = article.get_text()
+            match = re.search(r"\b(19|20)\d{2}\b", text)
+            if match:
+                return int(match.group())
+        # Fallback global
+        text = soup.get_text()
+        match = re.search(r"\b(19|20)\d{2}\b", text)
+        return int(match.group()) if match else None
+
+    @staticmethod
     def _extract_poster(soup) -> Optional[str]:
-        img = soup.find("img", class_="poster") or soup.find("img", class_="thumbnail")
-        if img and img.get("src"):
-            return img["src"]
+        # Prioridad 1: meta og:image
         og = soup.find("meta", property="og:image")
-        return og.get("content") if og and og.get("content") else None
+        if og and og.get("content"):
+            return og["content"]
+        # Prioridad 2: article figure img o figure img
+        fig_img = soup.select_one("article figure img, figure img")
+        if fig_img and fig_img.get("src"):
+            src = fig_img["src"]
+            if not src.startswith("data:"):
+                return src
+        return None
 
     @staticmethod
     def _count_episodes(soup) -> int:
-        return len(soup.select(".episodes a, .capitulos a, .item a"))
+        return len(soup.select("a[href*='capitulo-']"))
+
+    @staticmethod
+    def _is_known_server(url: str) -> bool:
+        """Verifica si la URL pertenece a un servidor de video conocido."""
+        known = ("doodstream", "voe", "vidhide", "filemoon", "streamtape", "upstream")
+        url_lower = url.lower()
+        return any(k in url_lower for k in known)
+
+    def _extract_server_from_list(self, soup) -> Optional[str]:
+        """Extrae URL de servidor de la lista ul/li con data-mdl."""
+        for li in soup.select("ul li"):
+            # Buscar div con data-mdl o data-url
+            div = li.find("div", attrs={"data-mdl": True}) or li.find("div", attrs={"data-url": True})
+            if div:
+                url = div.get("data-mdl") or div.get("data-url")
+                if url and self._is_known_server(url):
+                    return url if url.startswith("http") else urljoin(self._base, url)
+
+            # Buscar onclick con URL (siempre, no solo si hay div)
+            onclick = li.get("onclick")
+            if onclick:
+                match = re.search(r'["\'](https?://[^"\']+)["\']', onclick)
+                if match and self._is_known_server(match.group(1)):
+                    return match.group(1)
+
+            # Buscar enlaces dentro del li
+            for a in li.find_all("a", href=True):
+                if self._is_known_server(a["href"]):
+                    href = a["href"]
+                    return href if href.startswith("http") else urljoin(self._base, href)
+
+        return None
+
+    def _extract_server_from_scripts(self, soup) -> Optional[str]:
+        """Busca URLs de servidores en scripts inline."""
+        for script in soup.find_all("script"):
+            if not script.string:
+                continue
+            text = script.string
+            # Buscar patrones de URL en el script
+            for match in re.finditer(r'["\'](https?://[^"\']+)["\']', text):
+                url = match.group(1)
+                if self._is_known_server(url):
+                    return url
+        return None
 
     async def close(self) -> None:
         await self._client.aclose()
