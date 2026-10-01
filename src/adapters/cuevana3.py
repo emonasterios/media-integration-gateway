@@ -438,14 +438,22 @@ class Cuevana3Adapter(MediaProvider):
     def _extract_server_from_list(self, soup) -> Optional[str]:
         """Extrae URL de servidor de la lista ul/li con data-mdl."""
         for li in soup.select("ul li"):
-            # Buscar div con data-mdl o data-url
-            div = li.find("div", attrs={"data-mdl": True}) or li.find("div", attrs={"data-url": True})
+            # Buscar div dentro del li (puede tener data-mdl, data-url, o onclick)
+            div = li.find("div")
             if div:
+                # Buscar data-mdl o data-url
                 url = div.get("data-mdl") or div.get("data-url")
                 if url and self._is_known_server(url):
                     return url if url.startswith("http") else urljoin(self._base, url)
 
-            # Buscar onclick con URL (siempre, no solo si hay div)
+                # Buscar onclick en el div
+                onclick = div.get("onclick")
+                if onclick:
+                    match = re.search(r'["\'](https?://[^"\']+)["\']', onclick)
+                    if match and self._is_known_server(match.group(1)):
+                        return match.group(1)
+
+            # Buscar onclick en el li (fallback)
             onclick = li.get("onclick")
             if onclick:
                 match = re.search(r'["\'](https?://[^"\']+)["\']', onclick)

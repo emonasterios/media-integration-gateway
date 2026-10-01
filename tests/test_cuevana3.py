@@ -391,6 +391,7 @@ class TestCuevana3ResolvePlayback:
     @pytest.mark.asyncio
     async def test_resolve_playback_timeout_raises(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
         httpx_mock.add_exception(httpx.TimeoutException("Timeout"))
+        httpx_mock.add_exception(httpx.TimeoutException("Timeout"))
 
         with pytest.raises(ValueError, match="Timeout"):
             await adapter.resolve_playback("cuevana3:test")
@@ -424,7 +425,7 @@ class TestCuevana3ErrorHandling:
     @pytest.mark.asyncio
     async def test_search_http_error_returns_empty(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
         httpx_mock.add_response(
-            url="https://cuevana3i.cc/buscar/",
+            url="https://cuevana3i.cc/buscar/?q=test",
             method="GET",
             status_code=403,
         )
