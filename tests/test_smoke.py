@@ -3,7 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from src.main import app
+from src.main import create_app
 from src.services.catalog import CatalogService
 from src.adapters.base import MediaProvider
 from src.models.catalog import (
@@ -57,11 +57,9 @@ class FakeProvider(MediaProvider):
 @pytest.fixture()
 def client():
     svc = CatalogService(providers=[FakeProvider()])
-    from src.api.routes import _get_catalog
-    app.dependency_overrides[_get_catalog] = lambda: svc
-    with TestClient(app) as c:
+    test_app = create_app(override_catalog=svc)
+    with TestClient(test_app) as c:
         yield c
-    app.dependency_overrides.clear()
 
 
 def test_healthz(client):
