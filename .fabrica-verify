@@ -1,0 +1,1 @@
+cd /home/emon/media-integration-gateway && . .venv/bin/activate && pytest tests/ -v

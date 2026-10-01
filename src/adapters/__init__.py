@@ -1,0 +1,1 @@
+"""Init del paquete adapters."""
