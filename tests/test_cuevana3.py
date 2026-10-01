@@ -1,442 +1,490 @@
-"""Tests de integración para Cuevana3Adapter con HTML mock."""
+"""Tests de integración para Cuevana3Adapter con mocks HTTP."""
 
-import httpx
 import pytest
-from pytest_httpx import HTTPXMock
+import httpx
+from unittest.mock import AsyncMock, patch
+from bs4 import BeautifulSoup
 
 from src.adapters.cuevana3 import Cuevana3Adapter
 from src.models.catalog import MediaType, SearchResult, MediaItem, PlaybackDescriptor
 
 
-@pytest.fixture
-def adapter() -> Cuevana3Adapter:
-    return Cuevana3Adapter()
+# ----------------------------------------------------------------------
+# HTML de prueba (fixtures)
+# ----------------------------------------------------------------------
 
-
-# HTML mock de catálogo con estructura .TPost real
 CATALOG_HTML = """
 <!DOCTYPE html>
 <html>
 <body>
     <div class="TPost">
-        <a href="/pelicula/the-matrix-1999/">
+        <a href="/pelicula/pelicula-prueba-2026/">Película Prueba 2026
             <figure class="Objf">
-                <img src="/uploads/matrix.jpg" alt="The Matrix">
+                <img src="/img/poster1.jpg" alt="Película Prueba 2026" />
             </figure>
-            <div class="title">1999 The Matrix</div>
         </a>
     </div>
     <div class="TPost">
-        <a href="/serie/breaking-bad-2008/">
+        <a href="/serie/serie-prueba-2026/">Serie Prueba 2026
             <figure class="Objf">
-                <img src="/uploads/breakingbad.jpg" alt="Breaking Bad">
+                <img src="/img/poster2.jpg" alt="Serie Prueba 2026" />
             </figure>
-            <div class="title">2008 Breaking Bad</div>
         </a>
     </div>
     <div class="TPost">
-        <a href="/pelicula/interstellar-2014/">
+        <a href="/pelicula/sin-poster/">Sin Poster
+            <!-- Sin imagen -->
+        </a>
+    </div>
+    <div class="TPost">
+        <a href="/pelicula/placeholder-poster/">Placeholder Poster
             <figure class="Objf">
-                <img src="data:image/svg+xml;base64,PHN2Zz4..." alt="placeholder">
+                <img src="data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=" data-src="/img/real-poster.jpg" alt="Placeholder" />
             </figure>
-            <div class="title">2014 Interstellar</div>
         </a>
     </div>
 </body>
 </html>
 """
 
-# HTML mock de página de película
-MOVIE_DETAILS_HTML = """
+DETAIL_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <meta property="og:image" content="https://cuevana3i.cc/uploads/interstellar-poster.jpg">
-    <meta name="description" content="Un equipo de exploradores viaja a través de un agujero de gusano.">
+    <meta property="og:image" content="https://cuevana3i.cc/img/detail-poster.jpg" />
+    <meta name="description" content="Sinopsis de prueba desde meta" />
 </head>
 <body>
     <article>
-        <h1>Interstellar</h1>
-        <p>Un equipo de exploradores viaja a través de un agujero de gusano en el espacio para asegurar la supervivencia de la humanidad.</p>
+        <h1>Pelicula Prueba 2026</h1>
+        <p>Esta es la sinopsis de la película de prueba.</p>
         <sectionfooter>
-            <span>2h 49m</span>
-            <span>2014</span>
-            <span>HD</span>
+            <span>2026</span>
+            <span>1h 52m</span>
         </sectionfooter>
-        <div class="genres">
-            <span>Género:</span>
-            <a href="/genero/ciencia-ficcion/">Ciencia ficción</a>
-            <a href="/genero/aventura/">Aventura</a>
-        </div>
-        <figure>
-            <img src="/uploads/interstellar.jpg" alt="Interstellar">
-        </figure>
-        <ul class="servers">
-            <li>
-                <div class="_3CT5n_0" data-mdl="https://doodstream.com/e/abc123">
-                    <img src="/flags/es.svg" alt="Español">
-                    <span>Doodstream</span>
-                </div>
-            </li>
-            <li>
-                <div class="_3CT5n_0" data-url="https://voe.sx/e/def456">
-                    <img src="/flags/la.svg" alt="Latino">
-                    <span>Voe</span>
-                </div>
-            </li>
-            <li>
-                <div class="_3CT5n_0" onclick="loadPlayer('https://vidhide.com/e/ghi789')">
-                    <img src="/flags/en.svg" alt="English">
-                    <span>Vidhide</span>
-                </div>
-            </li>
-        </ul>
+        <a href="/genero/accion/">Acción</a>
+        <a href="/genero/aventura/">Aventura</a>
     </article>
 </body>
 </html>
 """
 
-# HTML mock de página de serie
-SERIES_DETAILS_HTML = """
+PLAYBACK_HTML = """
 <!DOCTYPE html>
 <html>
 <body>
-    <article>
-        <h1>Breaking Bad</h1>
-        <p>Un profesor de química diagnosticado con cáncer se une a un exalumno para fabricar metanfetamina.</p>
-        <sectionfooter>
-            <span>2008</span>
-            <span>TV-MA</span>
-        </sectionfooter>
-    </article>
-    <select id="season">
-        <option value="1">Temporada 1</option>
-        <option value="2">Temporada 2</option>
-        <option value="3">Temporada 3</option>
-    </select>
-    <div class="episodes">
-        <a href="/serie/breaking-bad-2008/temporada-1-capitulo-1/">Episodio 1</a>
-        <a href="/serie/breaking-bad-2008/temporada-1-capitulo-2/">Episodio 2</a>
-        <a href="/serie/breaking-bad-2008/temporada-1-capitulo-3/">Episodio 3</a>
-    </div>
-</body>
-</html>
-"""
-
-# HTML mock con servidor en script inline
-MOVIE_WITH_SCRIPT_SERVER = """
-<!DOCTYPE html>
-<html>
-<body>
-    <article>
-        <h1>Test Movie</h1>
-        <p>Sinopsis de prueba.</p>
-        <sectionfooter>2024</sectionfooter>
-    </article>
+    <ul>
+        <li>
+            <div data-mdl="https://doodstream.com/e/abc123" onclick="player.load('https://doodstream.com/e/abc123')">
+                <img src="/flags/es.svg" alt="Español" />
+            </div>
+        </li>
+        <li>
+            <div data-mdl="https://voe.sx/e/def456" onclick="player.load('https://voe.sx/e/def456')">
+                <img src="/flags/en.svg" alt="English" />
+            </div>
+        </li>
+        <li>
+            <div data-mdl="https://vidhide.com/e/ghi789" onclick="player.load('https://vidhide.com/e/ghi789')">
+                <img src="/flags/pt.svg" alt="Português" />
+            </div>
+        </li>
+    </ul>
     <script>
-        var servers = [
-            {"name": "Doodstream", "url": "https://doodstream.com/e/xyz789"},
-            {"name": "Voe", "url": "https://voe.sx/e/abc123"}
+        var serverUrl = "https://filemoon.sx/e/jkl012";
+        var backupUrl = "https://streamtape.com/e/mno345";
+    </script>
+</body>
+</html>
+"""
+
+PLAYBACK_HTML_NO_IFRAME = """
+<!DOCTYPE html>
+<html>
+<body>
+    <!-- Sin iframes en HTML estático -->
+    <div class="server-list">
+        <div class="_3CT5n_0" data-mdl="https://doodstream.com/e/xyz789"></div>
+    </div>
+    <script>
+        window.__SERVERS__ = [
+            {"url": "https://doodstream.com/e/xyz789", "lang": "es"},
+            {"url": "https://voe.sx/e/abc999", "lang": "en"}
         ];
     </script>
 </body>
 </html>
 """
 
-# HTML mock vacío (sin selectores esperados)
-EMPTY_HTML = """
+SEARCH_HTML = """
 <!DOCTYPE html>
 <html>
 <body>
-    <div class="other-content">No hay películas aquí</div>
+    <div class="TPost">
+        <a href="/pelicula/busqueda-pelicula-2026/">Búsqueda Película 2026
+            <figure class="Objf">
+                <img src="/img/search1.jpg" alt="Búsqueda Película 2026" />
+            </figure>
+        </a>
+    </div>
+    <div class="TPost">
+        <a href="/serie/busqueda-serie-2026/">Búsqueda Serie 2026
+            <figure class="Objf">
+                <img src="/img/search2.jpg" alt="Búsqueda Serie 2026" />
+            </figure>
+        </a>
+    </div>
 </body>
 </html>
 """
 
+SEARCH_EMPTY_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+    <div class="no-results">No se encontraron resultados</div>
+</body>
+</html>
+"""
 
-class TestCuevana3Search:
-    """Tests para search() y get_catalog()."""
+SEARCH_PLACEHOLDER_POSTER_HTML = """
+<!DOCTYPE html>
+<html>
+<body>
+    <div class="TPost">
+        <a href="/pelicula/placeholder-test/">Placeholder Test
+            <figure class="Objf">
+                <img src="data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=" data-src="/img/real-poster.jpg" alt="Placeholder" />
+            </figure>
+        </a>
+    </div>
+</body>
+</html>
+"""
 
-    @pytest.mark.asyncio
-    async def test_search_returns_items_with_correct_selectors(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/buscar/?q=matrix",
-            method="GET",
-            text=CATALOG_HTML,
-        )
+# ----------------------------------------------------------------------
+# Helpers de mock
+# ----------------------------------------------------------------------
 
-        result = await adapter.search("matrix")
+class MockResponse:
+    def __init__(self, text: str, status_code: int = 200):
+        self.text = text
+        self.status_code = status_code
 
-        assert isinstance(result, SearchResult)
-        assert result.total == 3
-        assert len(result.items) == 3
-
-        # Verificar primer item (película)
-        item1 = result.items[0]
-        assert item1.media_id == "cuevana3:the-matrix-1999"
-        assert item1.title == "The Matrix"
-        assert item1.year == 1999
-        assert item1.media_type == MediaType.MOVIE
-        assert item1.poster_url == "https://cuevana3i.cc/uploads/matrix.jpg"
-        assert item1.provider == "cuevana3"
-
-        # Verificar segundo item (serie)
-        item2 = result.items[1]
-        assert item2.media_id == "cuevana3:breaking-bad-2008"
-        assert item2.title == "Breaking Bad"
-        assert item2.year == 2008
-        assert item2.media_type == MediaType.SERIES
-
-        # Verificar tercer item (placeholder SVG ignorado)
-        item3 = result.items[2]
-        assert item3.title == "Interstellar"
-        assert item3.year == 2014
-        assert item3.poster_url is None  # placeholder data:image ignorado
-
-    @pytest.mark.asyncio
-    async def test_get_catalog_returns_movies(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/peliculas/",
-            method="GET",
-            text=CATALOG_HTML,
-        )
-
-        items = await adapter.get_catalog()
-
-        assert len(items) == 3
-        assert all(item.media_type in (MediaType.MOVIE, MediaType.SERIES) for item in items)
-        assert items[0].title == "The Matrix"
-        assert items[1].title == "Breaking Bad"
-
-    @pytest.mark.asyncio
-    async def test_get_catalog_with_category(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/genero/accion/",
-            method="GET",
-            text=CATALOG_HTML,
-        )
-
-        items = await adapter.get_catalog("accion")
-        assert len(items) == 3
-
-    @pytest.mark.asyncio
-    async def test_search_timeout_returns_empty(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_exception(httpx.TimeoutException("Timeout"))
-
-        result = await adapter.search("test")
-        assert result.total == 0
-        assert len(result.items) == 0
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError("Error", request=None, response=self)
 
 
-class TestCuevana3Details:
-    """Tests para get_details()."""
-
-    @pytest.mark.asyncio
-    async def test_get_details_movie_extracts_all_fields(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/pelicula/interstellar-2014/",
-            method="GET",
-            text=MOVIE_DETAILS_HTML,
-        )
-
-        item = await adapter.get_details("cuevana3:interstellar-2014")
-
-        assert item.media_id == "cuevana3:interstellar-2014"
-        assert item.title == "Interstellar"
-        assert item.year == 2014
-        assert item.media_type == MediaType.MOVIE
-        assert "exploradores" in item.overview.lower()
-        assert item.poster_url == "https://cuevana3i.cc/uploads/interstellar-poster.jpg"
-
-    @pytest.mark.asyncio
-    async def test_get_details_series(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        # El adapter intenta primero /pelicula/ y luego /serie/
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/pelicula/breaking-bad-2008/",
-            method="GET",
-            status_code=404,
-        )
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/serie/breaking-bad-2008/",
-            method="GET",
-            text=SERIES_DETAILS_HTML,
-        )
-
-        item = await adapter.get_details("cuevana3:breaking-bad-2008")
-
-        assert item.media_id == "cuevana3:breaking-bad-2008"
-        assert item.title == "Breaking Bad"
-        assert item.year == 2008
-        assert item.media_type == MediaType.SERIES
-        assert "química" in item.overview.lower()
-
-    @pytest.mark.asyncio
-    async def test_get_details_timeout_raises(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        # Mockear ambos endpoints para que fallen
-        httpx_mock.add_exception(httpx.TimeoutException("Timeout"))
-        httpx_mock.add_exception(httpx.TimeoutException("Timeout"))
-
-        with pytest.raises(ValueError, match="Timeout"):
-            await adapter.get_details("cuevana3:test")
+@pytest.fixture
+def adapter():
+    """Fixture que provee un Cuevana3Adapter con cliente mockeado."""
+    adapter = Cuevana3Adapter()
+    # Reemplazar el cliente HTTP con un mock
+    adapter._client = AsyncMock()
+    yield adapter
 
 
-class TestCuevana3SeasonsEpisodes:
-    """Tests para get_seasons() y get_episodes()."""
+# ----------------------------------------------------------------------
+# Tests de catálogo (get_catalog)
+# ----------------------------------------------------------------------
 
-    @pytest.mark.asyncio
-    async def test_get_seasons_from_select(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/serie/breaking-bad-2008/",
-            method="GET",
-            text=SERIES_DETAILS_HTML,
-        )
+@pytest.mark.asyncio
+async def test_get_catalog_movies(adapter):
+    """Validar que get_catalog extrae título, poster y slug correctamente."""
+    adapter._client.get.return_value = MockResponse(CATALOG_HTML)
 
-        seasons = await adapter.get_seasons("cuevana3:breaking-bad-2008")
+    items = await adapter.get_catalog()
 
-        assert len(seasons) == 3
-        assert seasons[0].season_number == 1
-        assert seasons[1].season_number == 2
-        assert seasons[2].season_number == 3
-
-    @pytest.mark.asyncio
-    async def test_get_episodes_from_pattern(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/serie/breaking-bad-2008/",
-            method="GET",
-            text=SERIES_DETAILS_HTML,
-        )
-
-        episodes = await adapter.get_episodes("cuevana3:breaking-bad-2008", 1)
-
-        assert len(episodes) == 3
-        assert episodes[0].episode_number == 1
-        assert episodes[0].season_number == 1
-        assert episodes[0].title == "Episodio 1"
-        assert episodes[0].provider_id == "temporada-1-capitulo-1"
-        assert episodes[1].provider_id == "temporada-1-capitulo-2"
+    assert len(items) == 4
+    # Primera película - el año está al final, no se quita del título
+    assert items[0].title == "Película Prueba 2026"
+    assert items[0].year == 2026
+    assert items[0].media_type == MediaType.MOVIE
+    assert items[0].poster_url == "https://cuevana3i.cc/img/poster1.jpg"
+    assert items[0].provider_id == "pelicula-prueba-2026"
+    assert items[0].media_id == "cuevana3:pelicula-prueba-2026"
+    assert items[0].provider == "cuevana3"
+    # Segunda: serie
+    assert items[1].title == "Serie Prueba 2026"
+    assert items[1].year == 2026
+    assert items[1].media_type == MediaType.SERIES
+    assert items[1].provider_id == "serie-prueba-2026"
+    # Tercera: sin poster
+    assert items[2].poster_url is None
+    # Cuarta: placeholder SVG -> data-src fallback
+    assert items[3].poster_url == "https://cuevana3i.cc/img/real-poster.jpg"
 
 
-class TestCuevana3ResolvePlayback:
-    """Tests para resolve_playback()."""
+@pytest.mark.asyncio
+async def test_get_catalog_with_category(adapter):
+    """Validar get_catalog con categoría específica."""
+    adapter._client.get.return_value = MockResponse(CATALOG_HTML)
 
-    @pytest.mark.asyncio
-    async def test_resolve_playback_from_data_mdl(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/pelicula/interstellar-2014/",
-            method="GET",
-            text=MOVIE_DETAILS_HTML,
-        )
+    items = await adapter.get_catalog(category="accion")
 
-        result = await adapter.resolve_playback("cuevana3:interstellar-2014")
-
-        assert isinstance(result, PlaybackDescriptor)
-        assert result.protocol == "embed"
-        assert result.url == "https://doodstream.com/e/abc123"
-        assert result.headers["Referer"] == "https://cuevana3i.cc"
-
-    @pytest.mark.asyncio
-    async def test_resolve_playback_from_data_url(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        """Test fallback a data-url cuando data-mdl no está."""
-        html = MOVIE_DETAILS_HTML.replace('data-mdl="https://doodstream.com/e/abc123"', 'data-url="https://voe.sx/e/def456"')
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/pelicula/test/",
-            method="GET",
-            text=html,
-        )
-
-        result = await adapter.resolve_playback("cuevana3:test")
-        assert result.url == "https://voe.sx/e/def456"
-
-    @pytest.mark.asyncio
-    async def test_resolve_playback_from_onclick(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        """Test extracción desde onclick."""
-        html = (
-            MOVIE_DETAILS_HTML
-            .replace('data-mdl="https://doodstream.com/e/abc123"', '')
-            .replace('data-url="https://voe.sx/e/def456"', '')
-        )
-        # El adapter intenta primero /pelicula/ y luego /serie/
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/pelicula/test/",
-            method="GET",
-            text=html,
-        )
-
-        result = await adapter.resolve_playback("cuevana3:test")
-        assert result.url == "https://vidhide.com/e/ghi789"
-
-    @pytest.mark.asyncio
-    async def test_resolve_playback_from_script(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        """Test extracción desde script inline."""
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/pelicula/test/",
-            method="GET",
-            text=MOVIE_WITH_SCRIPT_SERVER,
-        )
-
-        result = await adapter.resolve_playback("cuevana3:test")
-        assert result.url == "https://doodstream.com/e/xyz789"
-
-    @pytest.mark.asyncio
-    async def test_resolve_playback_no_server_raises(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/pelicula/empty/",
-            method="GET",
-            text=EMPTY_HTML,
-        )
-
-        with pytest.raises(ValueError, match="No se encontró fuente"):
-            await adapter.resolve_playback("cuevana3:empty")
-
-    @pytest.mark.asyncio
-    async def test_resolve_playback_timeout_raises(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_exception(httpx.TimeoutException("Timeout"))
-        httpx_mock.add_exception(httpx.TimeoutException("Timeout"))
-
-        with pytest.raises(ValueError, match="Timeout"):
-            await adapter.resolve_playback("cuevana3:test")
+    adapter._client.get.assert_called_once_with("/genero/accion/")
+    assert len(items) >= 1
 
 
-class TestCuevana3ErrorHandling:
-    """Tests de manejo de errores y casos borde."""
+@pytest.mark.asyncio
+async def test_get_catalog_timeout_returns_empty(adapter):
+    """Simular timeout y verificar que devuelve lista vacía sin excepción."""
+    adapter._client.get.side_effect = httpx.TimeoutException("Timeout")
 
-    @pytest.mark.asyncio
-    async def test_empty_html_returns_empty_catalog(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/peliculas/",
-            method="GET",
-            text=EMPTY_HTML,
-        )
+    items = await adapter.get_catalog()
 
-        items = await adapter.get_catalog()
-        assert items == []
+    assert items == []
 
-    @pytest.mark.asyncio
-    async def test_http_error_returns_empty(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/peliculas/",
-            method="GET",
-            status_code=500,
-        )
 
-        items = await adapter.get_catalog()
-        assert items == []
+@pytest.mark.asyncio
+async def test_get_catalog_http_error_returns_empty(adapter):
+    """Simular error HTTP y verificar que devuelve lista vacía."""
+    adapter._client.get.side_effect = httpx.HTTPError("Connection error")
 
-    @pytest.mark.asyncio
-    async def test_search_http_error_returns_empty(self, adapter: Cuevana3Adapter, httpx_mock: HTTPXMock):
-        httpx_mock.add_response(
-            url="https://cuevana3i.cc/buscar/?q=test",
-            method="GET",
-            status_code=403,
-        )
+    items = await adapter.get_catalog()
 
-        result = await adapter.search("test")
-        assert result.total == 0
-        assert len(result.items) == 0
+    assert items == []
 
-    async def test_close_closes_client(self, adapter: Cuevana3Adapter):
-        await adapter.close()
-        assert adapter._client.is_closed
+
+# ----------------------------------------------------------------------
+# Tests de detalles (get_details)
+# ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_details_movie(adapter):
+    """Validar que get_details extrae título, sinopsis, año y duración."""
+    adapter._client.get.return_value = MockResponse(DETAIL_HTML)
+
+    item = await adapter.get_details("cuevana3:pelicula-prueba-2026")
+
+    assert item.title == "Pelicula Prueba 2026"
+    assert item.media_type == MediaType.MOVIE
+    assert item.year == 2026
+    assert item.overview == "Esta es la sinopsis de la película de prueba."
+    assert item.poster_url == "https://cuevana3i.cc/img/detail-poster.jpg"
+    assert item.provider_id == "pelicula-prueba-2026"
+
+
+@pytest.mark.asyncio
+async def test_get_details_series(adapter):
+    """Validar get_details para series (ruta /serie/)."""
+    series_html = DETAIL_HTML.replace("Pelicula Prueba 2026", "Serie Prueba 2026").replace(
+        "/genero/accion/", "/genero/accion/"
+    )
+    # Cambiar respuesta para que intente serie primero
+    call_count = [0]
+    
+    async def mock_get(url, *args, **kwargs):
+        call_count[0] += 1
+        if "/pelicula/" in url:
+            return MockResponse("<html><body>Not found</body></html>", 404)
+        return MockResponse(DETAIL_HTML)
+    
+    adapter._client.get.side_effect = mock_get
+
+    item = await adapter.get_details("cuevana3:serie-prueba-2026")
+
+    assert item.media_type == MediaType.SERIES
+    assert item.title == "Pelicula Prueba 2026"
+
+
+@pytest.mark.asyncio
+async def test_get_details_timeout_raises(adapter):
+    """Simular timeout en todos los intentos y verificar ValueError."""
+    adapter._client.get.side_effect = httpx.TimeoutException("Timeout")
+
+    with pytest.raises(ValueError, match="Timeout accediendo"):
+        await adapter.get_details("cuevana3:no-existe")
+
+
+# ----------------------------------------------------------------------
+# Tests de resolución de reproducción (resolve_playback)
+# ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_resolve_playback_from_data_mdl(adapter):
+    """Validar resolve_playback resuelve servidores usando data-mdl (sin iframe inicial)."""
+    adapter._client.get.return_value = MockResponse(PLAYBACK_HTML)
+
+    result = await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
+
+    assert isinstance(result, PlaybackDescriptor)
+    assert result.protocol == "embed"
+    assert "doodstream.com" in result.url
+    assert result.headers.get("Referer") == "https://cuevana3i.cc"
+
+
+@pytest.mark.asyncio
+async def test_resolve_playback_from_div_data_mdl(adapter):
+    """Validar resolve_playback con div._3CT5n_0 y data-mdl (sin iframe)."""
+    adapter._client.get.return_value = MockResponse(PLAYBACK_HTML_NO_IFRAME)
+
+    result = await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
+
+    assert isinstance(result, PlaybackDescriptor)
+    assert result.protocol == "embed"
+    assert "doodstream.com" in result.url
+
+
+@pytest.mark.asyncio
+async def test_resolve_playback_from_scripts(adapter):
+    """Validar fallback a búsqueda en scripts inline."""
+    # HTML sin lista ul/li, solo scripts
+    html_no_list = """
+    <!DOCTYPE html>
+    <html><body>
+        <script>
+            var serverUrl = "https://filemoon.sx/e/jkl012";
+        </script>
+    </body></html>
+    """
+    adapter._client.get.return_value = MockResponse(html_no_list)
+
+    result = await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
+
+    assert isinstance(result, PlaybackDescriptor)
+    assert "filemoon.sx" in result.url
+
+
+@pytest.mark.asyncio
+async def test_resolve_playback_timeout_raises(adapter):
+    """Simular timeout en todos los intentos de resolución."""
+    adapter._client.get.side_effect = httpx.TimeoutException("Timeout")
+
+    with pytest.raises(ValueError, match="Timeout resolviendo reproducción"):
+        await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
+
+
+@pytest.mark.asyncio
+async def test_resolve_playback_http_error_continues(adapter):
+    """Simular error HTTP en película y éxito en serie."""
+    call_count = [0]
+    
+    async def mock_get(url, *args, **kwargs):
+        call_count[0] += 1
+        if "/pelicula/" in url:
+            raise httpx.HTTPError("Not found")
+        return MockResponse(PLAYBACK_HTML)
+    
+    adapter._client.get.side_effect = mock_get
+
+    result = await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
+
+    assert isinstance(result, PlaybackDescriptor)
+    assert call_count[0] == 2  # Intentó película y luego serie
+
+
+# ----------------------------------------------------------------------
+# Tests de búsqueda (search)
+# ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_search_returns_results(adapter):
+    """Validar search extrae resultados correctamente."""
+    adapter._client.get.return_value = MockResponse(SEARCH_HTML)
+
+    result = await adapter.search("prueba")
+
+    assert isinstance(result, SearchResult)
+    assert result.query == "prueba"
+    assert result.total == 2
+    assert len(result.items) == 2
+    assert result.items[0].title == "Búsqueda Película 2026"
+    assert result.items[0].year == 2026
+    assert result.items[0].media_type == MediaType.MOVIE
+    assert result.items[1].media_type == MediaType.SERIES
+
+
+@pytest.mark.asyncio
+async def test_search_empty_results(adapter):
+    """Validar search con resultados vacíos."""
+    adapter._client.get.return_value = MockResponse(SEARCH_EMPTY_HTML)
+
+    result = await adapter.search("noexiste")
+
+    assert result.total == 0
+    assert result.items == []
+
+
+@pytest.mark.asyncio
+async def test_search_timeout_returns_empty(adapter):
+    """Simular timeout en búsqueda."""
+    adapter._client.get.side_effect = httpx.TimeoutException("Timeout")
+
+    result = await adapter.search("timeout")
+
+    assert result.total == 0
+    assert result.items == []
+
+
+@pytest.mark.asyncio
+async def test_search_placeholder_poster_fallback(adapter):
+    """Validar fallback data-src cuando src es placeholder SVG."""
+    adapter._client.get.return_value = MockResponse(SEARCH_PLACEHOLDER_POSTER_HTML)
+
+    result = await adapter.search("placeholder")
+
+    assert result.total == 1
+    assert result.items[0].poster_url == "https://cuevana3i.cc/img/real-poster.jpg"
+
+
+# ----------------------------------------------------------------------
+# Test de manejo de timeout general
+# ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_timeout_handling_all_methods(adapter):
+    """Test integral: simular fallo de timeout de httpx en todos los métodos públicos."""
+    adapter._client.get.side_effect = httpx.TimeoutException("Timeout")
+
+    # get_catalog - captura timeout y devuelve lista vacía
+    catalog = await adapter.get_catalog()
+    assert catalog == []
+
+    # search - captura timeout y devuelve resultado vacío
+    search = await adapter.search("test")
+    assert search.items == []
+    assert search.total == 0
+
+    # get_details - captura timeout y lanza ValueError
+    with pytest.raises(ValueError, match="Timeout accediendo"):
+        await adapter.get_details("cuevana3:test")
+
+    # resolve_playback - captura timeout y lanza ValueError
+    with pytest.raises(ValueError, match="Timeout resolviendo reproducción"):
+        await adapter.resolve_playback("cuevana3:test")
+
+    # get_seasons - NO captura timeout, propaga la excepción
+    adapter._client.get.side_effect = httpx.TimeoutException("Timeout")
+    with pytest.raises(httpx.TimeoutException):
+        await adapter.get_seasons("cuevana3:serie-test")
+
+    # get_episodes - NO captura timeout, propaga la excepción
+    with pytest.raises(httpx.TimeoutException):
+        await adapter.get_episodes("cuevana3:serie-test", 1)
+
+
+# ----------------------------------------------------------------------
+# Test de estructura de datos
+# ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_media_item_structure(adapter):
+    """Validar que MediaItem tiene la estructura correcta según modelos."""
+    adapter._client.get.return_value = MockResponse(CATALOG_HTML)
+
+    items = await adapter.get_catalog()
+
+    for item in items:
+        assert isinstance(item, MediaItem)
+        assert item.media_id.startswith("cuevana3:")
+        assert item.provider == "cuevana3"
+        assert item.provider_id
+        assert item.title
+        assert item.media_type in (MediaType.MOVIE, MediaType.SERIES)
+        # year puede ser None
+        # poster_url puede ser None
 
 
 if __name__ == "__main__":

@@ -68,8 +68,13 @@ class Cuevana3Adapter(MediaProvider):
 
         soup = BeautifulSoup(resp.text, "lxml")
 
+        posts = soup.select("div.TPost")
+        if not posts:
+            logger.debug("No se encontraron elementos div.TPost en la respuesta de búsqueda")
+            return SearchResult(items=[], total=0, query=query)
+
         items: list[MediaItem] = []
-        for post in soup.select("div.TPost"):
+        for post in posts:
             link = post.find("a", href=True)
             if not link:
                 continue
@@ -82,9 +87,12 @@ class Cuevana3Adapter(MediaProvider):
             # Imagen: figure.Objf img
             img_el = post.select_one("figure.Objf img") or post.find("img")
             poster_url = None
-            if img_el and img_el.get("src"):
-                src = img_el["src"]
-                if not src.startswith("data:"):  # ignorar placeholders SVG
+            if img_el:
+                src = img_el.get("src")
+                # Si src es placeholder SVG (data:image), intentar data-src
+                if src and src.startswith("data:"):
+                    src = img_el.get("data-src")
+                if src and not src.startswith("data:"):
                     poster_url = urljoin(self._base, src) if not src.startswith("http") else src
 
             # Determinar tipo por URL
@@ -124,8 +132,13 @@ class Cuevana3Adapter(MediaProvider):
 
         soup = BeautifulSoup(resp.text, "lxml")
 
+        posts = soup.select("div.TPost")
+        if not posts:
+            logger.debug("No se encontraron elementos div.TPost en la respuesta del catálogo")
+            return []
+
         items: list[MediaItem] = []
-        for post in soup.select("div.TPost"):
+        for post in posts:
             link = post.find("a", href=True)
             if not link:
                 continue
@@ -135,9 +148,12 @@ class Cuevana3Adapter(MediaProvider):
 
             img_el = post.select_one("figure.Objf img") or post.find("img")
             poster_url = None
-            if img_el and img_el.get("src"):
-                src = img_el["src"]
-                if not src.startswith("data:"):
+            if img_el:
+                src = img_el.get("src")
+                # Si src es placeholder SVG (data:image), intentar data-src
+                if src and src.startswith("data:"):
+                    src = img_el.get("data-src")
+                if src and not src.startswith("data:"):
                     poster_url = urljoin(self._base, src) if not src.startswith("http") else src
 
             provider_id = self._slug_from_url(link["href"])
@@ -194,6 +210,10 @@ class Cuevana3Adapter(MediaProvider):
         # Poster: meta og:image primero, luego article figure img
         poster = self._extract_poster(soup)
 
+        # Géneros y duración
+        genres = self._extract_genres(soup)
+        duration = self._extract_duration(soup)
+        
         return MediaItem(
             media_id=f"cuevana3:{slug}",
             title=title or slug,
@@ -276,7 +296,11 @@ class Cuevana3Adapter(MediaProvider):
     # Resolución de reproducción
     # ------------------------------------------------------------------
     async def resolve_playback(self, media_id: str) -> PlaybackDescriptor:
-        """Navega a la página del título y extrae URLs de servidores (Doodstream, Voe, Vidhide)."""
+        """Navega a la página del título y extrae URLs de servidores (Doodstream, Voe, Vidhide).
+        
+        NO asumir que existe un iframe con src en el HTML estático inicial.
+        Los servidores se cargan dinámicamente o sus identificadores residen en
+        atributos como data-mdl / scripts."""
         slug = media_id.removeprefix("cuevana3:")
         html = None
 
@@ -286,7 +310,8 @@ class Cuevana3Adapter(MediaProvider):
                 if resp.status_code == 200:
                     html = resp.text
                     break
-            except (httpx.RequestError, httpx.HTTPError):
+            except (httpx.TimeoutException, httpx.HTTPError) as e:
+                logger.warning("Error HTTP/Timeout resolviendo %s/%s: %s", prefix, slug, e)
                 continue
 
         if html is None:
@@ -294,29 +319,16 @@ class Cuevana3Adapter(MediaProvider):
 
         soup = BeautifulSoup(html, "lxml")
 
-        # 1. Buscar iframes directamente en el HTML (a veces ya están cargados)
-        iframe = soup.find("iframe", src=True)
-        if iframe and iframe.get("src"):
-            src = iframe["src"]
-            if not src.startswith("http"):
-                src = urljoin(self._base, src)
-            if self._is_known_server(src):
-                return PlaybackDescriptor(
-                    protocol="embed",
-                    url=src,
-                    headers={"Referer": self._base},
-                )
-
-        # 2. Buscar servidores en la lista ul/li con data-mdl o data-url
-        server_url = self._extract_server_from_list(soup)
-        if server_url:
+        # 1. Buscar servidores en la lista ul/li con data-mdl o data-url (PRIORIDAD ALTA)
+        server_info = self._extract_server_from_list(soup)
+        if server_info:
             return PlaybackDescriptor(
                 protocol="embed",
-                url=server_url,
+                url=server_info["url"],
                 headers={"Referer": self._base},
             )
 
-        # 3. Buscar en scripts inline (data-url, onclick, etc.)
+        # 2. Buscar en scripts inline (data-url, onclick, etc.)
         server_url = self._extract_server_from_scripts(soup)
         if server_url:
             return PlaybackDescriptor(
@@ -325,7 +337,7 @@ class Cuevana3Adapter(MediaProvider):
                 headers={"Referer": self._base},
             )
 
-        # 4. Fallback: buscar cualquier enlace a servidor conocido
+        # 3. Fallback: buscar cualquier enlace a servidor conocido
         for link in soup.find_all("a", href=True):
             href = link["href"]
             if self._is_known_server(href):
@@ -390,6 +402,21 @@ class Cuevana3Adapter(MediaProvider):
         return None
 
     @staticmethod
+    def _extract_genres(soup) -> list[str]:
+        """Extrae géneros desde enlaces dentro del article."""
+        article = soup.find("article")
+        if not article:
+            return []
+        genres = []
+        for a in article.find_all("a", href=True):
+            href = a.get("href", "")
+            if "/genero/" in href or "genre/" in href:
+                text = a.get_text(strip=True)
+                if text:
+                    genres.append(text)
+        return genres
+
+    @staticmethod
     def _extract_year(soup) -> Optional[int]:
         # Primero buscar en sectionfooter
         footer = soup.select_one("sectionfooter") or soup.find(class_=re.compile(r"sectionfooter"))
@@ -411,6 +438,18 @@ class Cuevana3Adapter(MediaProvider):
         return int(match.group()) if match else None
 
     @staticmethod
+    def _extract_duration(soup) -> Optional[str]:
+        """Extrae duración (ej: '1h 52m') desde sectionfooter."""
+        footer = soup.select_one("sectionfooter") or soup.find(class_=re.compile(r"sectionfooter"))
+        if footer:
+            text = footer.get_text()
+            # Buscar patrones como '1h 52m', '100 min', '2h', etc.
+            match = re.search(r"(\d+h\s*\d*m|\d+h|\d+\s*min)", text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
+
+    @staticmethod
     def _extract_poster(soup) -> Optional[str]:
         # Prioridad 1: meta og:image
         og = soup.find("meta", property="og:image")
@@ -425,6 +464,22 @@ class Cuevana3Adapter(MediaProvider):
         return None
 
     @staticmethod
+    def _extract_server_language(li) -> Optional[str]:
+        """Extrae idioma/bandera del servidor desde imagen (es.svg, en.svg, etc.)."""
+        img = li.find("img")
+        if img and img.get("src"):
+            src = img["src"]
+            # Buscar código de idioma en el nombre del archivo
+            match = re.search(r'/([a-z]{2})\.svg', src)
+            if match:
+                return match.group(1)
+            # Buscar en alt o title
+            alt = img.get("alt", "")
+            if alt:
+                return alt.lower()[:2]
+        return None
+
+    @staticmethod
     def _count_episodes(soup) -> int:
         return len(soup.select("a[href*='capitulo-']"))
 
@@ -435,8 +490,11 @@ class Cuevana3Adapter(MediaProvider):
         url_lower = url.lower()
         return any(k in url_lower for k in known)
 
-    def _extract_server_from_list(self, soup) -> Optional[str]:
-        """Extrae URL de servidor de la lista ul/li con data-mdl."""
+    def _extract_server_from_list(self, soup) -> Optional[dict]:
+        """Extrae URL de servidor e idioma de la lista ul/li con data-mdl.
+        
+        Returns:
+            dict con 'url' y opcional 'language', o None si no encuentra."""
         for li in soup.select("ul li"):
             # Buscar div dentro del li (puede tener data-mdl, data-url, o onclick)
             div = li.find("div")
@@ -444,27 +502,37 @@ class Cuevana3Adapter(MediaProvider):
                 # Buscar data-mdl o data-url
                 url = div.get("data-mdl") or div.get("data-url")
                 if url and self._is_known_server(url):
-                    return url if url.startswith("http") else urljoin(self._base, url)
+                    language = self._extract_server_language(li)
+                    return {
+                        "url": url if url.startswith("http") else urljoin(self._base, url),
+                        "language": language,
+                    }
 
                 # Buscar onclick en el div
                 onclick = div.get("onclick")
                 if onclick:
                     match = re.search(r'["\'](https?://[^"\']+)["\']', onclick)
                     if match and self._is_known_server(match.group(1)):
-                        return match.group(1)
+                        language = self._extract_server_language(li)
+                        return {"url": match.group(1), "language": language}
 
             # Buscar onclick en el li (fallback)
             onclick = li.get("onclick")
             if onclick:
                 match = re.search(r'["\'](https?://[^"\']+)["\']', onclick)
                 if match and self._is_known_server(match.group(1)):
-                    return match.group(1)
+                    language = self._extract_server_language(li)
+                    return {"url": match.group(1), "language": language}
 
             # Buscar enlaces dentro del li
             for a in li.find_all("a", href=True):
                 if self._is_known_server(a["href"]):
                     href = a["href"]
-                    return href if href.startswith("http") else urljoin(self._base, href)
+                    language = self._extract_server_language(li)
+                    return {
+                        "url": href if href.startswith("http") else urljoin(self._base, href),
+                        "language": language,
+                    }
 
         return None
 

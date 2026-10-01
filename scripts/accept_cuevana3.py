@@ -2,9 +2,12 @@
 """Script de aceptación para el adapter Cuevana3."""
 import asyncio
 import sys
-sys.path.insert(0, "/home/emon/media-integration-gateway/src")
+from pathlib import Path
 
-from adapters.cuevana3 import Cuevana3Adapter
+# El adapter importa "src.adapters...": hace falta la RAÍZ del repo en el path, no src/.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.adapters.cuevana3 import Cuevana3Adapter
 
 
 async def main():
