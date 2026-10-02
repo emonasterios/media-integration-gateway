@@ -73,7 +73,8 @@ async def xtream_player_api(
     if not username or not password:
         return {"user_info": {"auth": 0}, "server_info": {}}
 
-    base_url = str(request.base_url).rstrip("/")
+    public_host = request.url.hostname or "localhost"
+    public_port = request.url.port or (443 if request.url.scheme == "https" else 80)
     now = datetime.now()
     timestamp_now = str(int(now.timestamp()))
     time_now = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -92,10 +93,13 @@ async def xtream_player_api(
     }
 
     server_info = {
-        "url": base_url,
-        "port": "8080",
+        # Xtream clients combine these fields themselves.  Advertising a URL
+        # that already contains the port while also reporting the container's
+        # internal port makes some TVs reject the playlist.
+        "url": public_host,
+        "port": str(public_port),
         "https_port": "",
-        "server_protocol": "http",
+        "server_protocol": request.url.scheme,
         "rtmp_port": "",
         "timezone": "America/Caracas",
         "timestamp_now": timestamp_now,

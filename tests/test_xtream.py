@@ -161,6 +161,22 @@ def test_player_api_default_action(client):
     assert data["user_info"]["status"] == "Active"
     assert "url" in data["server_info"]
     assert "timezone" in data["server_info"]
+    assert data["server_info"]["url"] == "testserver"
+    assert data["server_info"]["port"] == "80"
+    assert data["server_info"]["server_protocol"] == "http"
+
+
+def test_player_api_advertises_external_host_and_port(client):
+    """Xtream anuncia la dirección vista por el cliente, no el puerto interno."""
+    r = client.get(
+        "/player_api.php?username=test&password=test",
+        headers={"host": "192.168.50.229:9193"},
+    )
+    assert r.status_code == 200
+    server_info = r.json()["server_info"]
+    assert server_info["url"] == "192.168.50.229"
+    assert server_info["port"] == "9193"
+    assert server_info["server_protocol"] == "http"
 
 
 def test_player_api_get_vod_categories(client):
