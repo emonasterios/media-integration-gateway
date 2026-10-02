@@ -1,0 +1,15 @@
+Collecting alembic
+  Downloading alembic-1.20.0-py3-none-any.whl.metadata (7.3 kB)
+Requirement already satisfied: SQLAlchemy>=2.0 in ./.venv/lib/python3.11/site-packages (from alembic) (2.1.1)
+Collecting Mako (from alembic)
+  Downloading mako-1.4.3-py3-none-any.whl.metadata (2.9 kB)
+Requirement already satisfied: typing-extensions>=4.12 in ./.venv/lib/python3.11/site-packages (from alembic) (4.16.0)
+Collecting MarkupSafe>=2.0 (from Mako->alembic)
+  Downloading markupsafe-3.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.7 kB)
+Downloading alembic-1.20.0-py3-none-any.whl (268 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 268.7/268.7 kB 1.4 MB/s eta 0:00:00
+Downloading mako-1.4.3-py3-none-any.whl (80 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 80.2/80.2 kB 4.6 MB/s eta 0:00:00
+Downloading markupsafe-3.0.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (22 kB)
+Installing collected packages: MarkupSafe, Mako, alembic
+Successfully installed Mako-1.4.3 MarkupSafe-3.0.3 alembic-1.20.0
