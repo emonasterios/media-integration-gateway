@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 
 from src.models.catalog import (
     Episode,
@@ -103,16 +104,30 @@ async def get_episodes(
 # Resolución de reproducción
 # -------------------------------------------------------------------
 @router.post("/playback/resolve/{provider}/{media_id}", response_model=PlaybackDescriptor)
+@router.get("/playback/resolve/{provider}/{media_id}")
+@router.get("/resolve/{provider}/{media_id}")
 async def resolve_playback(
+    request: Request,
     provider: str,
     media_id: str,
     catalog: CatalogService = Depends(_get_catalog),
 ):
-    """Obtener URL de reproducción para un elemento."""
+    """Obtener URL de reproducción para un elemento.
+
+    Soporta GET para clientes IPTV que consumen playlists M3U y POST para APIs.
+    En GET, redirige directamente a la URL de stream (307).
+    En POST, devuelve el descriptor completo de reproducción.
+    """
     try:
-        return await catalog.resolve_playback(provider, media_id)
+        result = await catalog.resolve_playback(provider, media_id)
     except (KeyError, ValueError) as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+    # Para GET, redirigir directamente a la URL de reproducción
+    if request.method == "GET":
+        return RedirectResponse(url=result.url, status_code=307)
+
+    return result
 
 
 # -------------------------------------------------------------------
