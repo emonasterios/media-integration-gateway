@@ -24,7 +24,9 @@ def create_app(override_catalog: Optional[CatalogService] = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if override_catalog is not None:
             from src.api.routes import _get_catalog
+            from src.api.xtream import _get_catalog_service as _xtream_get_catalog
             app.dependency_overrides[_get_catalog] = lambda: override_catalog
+            app.dependency_overrides[_xtream_get_catalog] = lambda: override_catalog
             yield
         else:
             from src.db.database import SessionLocal, init_db
@@ -34,7 +36,9 @@ def create_app(override_catalog: Optional[CatalogService] = None) -> FastAPI:
             adapter = Cuevana3Adapter()
             catalog = CatalogService(providers=[adapter], cache=CatalogCache(db))
             from src.api.routes import _get_catalog
+            from src.api.xtream import _get_catalog_service as _xtream_get_catalog
             app.dependency_overrides[_get_catalog] = lambda: catalog
+            app.dependency_overrides[_xtream_get_catalog] = lambda: catalog
             yield
             await adapter.close()
             db.close()
