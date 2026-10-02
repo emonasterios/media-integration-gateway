@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from src.adapters.cuevana3 import Cuevana3Adapter
 from src.api.routes import router
+from src.api.m3u import router as m3u_router
 from src.core.config import settings
 from src.db.database import SessionLocal
 from src.services.catalog import CatalogService
@@ -44,6 +45,7 @@ def create_app(override_catalog: Optional[CatalogService] = None) -> FastAPI:
     )
 
     app.include_router(router)
+    app.include_router(m3u_router)
 
     @app.get("/healthz")
     async def health():
