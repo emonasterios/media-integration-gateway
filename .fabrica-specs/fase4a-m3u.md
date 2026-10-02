@@ -20,7 +20,10 @@ http://localhost:8000/api/v1/resolve/cuevana3/signal-one
 cd /home/emon/media-integration-gateway && . .venv/bin/activate && pytest tests/ -v
 
 ## PREMISES
-- src/main.py ya registra routers de api/v1
-- src/services/cache.py tiene catálogo cacheado
-- src/models/catalog.py tiene MediaItem con title, url, poster, type
-- 57 tests pasando actualmente
+- src/main.py crea la app con create_app() e incluye router de src/api/routes.py (prefijo /api/v1)
+- src/api/routes.py tiene endpoints: /search, /catalog/{provider}, /details/{provider}/{media_id}, /seasons, /episodes, /playback/resolve/{provider}/{media_id}, /providers
+- src/services/cache.py tiene CatalogCache con métodos populate(), get_cached_catalog(), get_cached_item()
+- src/models/catalog.py tiene MediaItem con campos: media_id, title, media_type, year, poster_url, overview, provider, provider_id
+- src/services/catalog.py tiene CatalogService con search(), get_catalog(), get_details(), get_seasons(), get_episodes(), resolve_playback()
+- 57 tests pasando actualmente en main
+- El endpoint de resolución es POST /api/v1/playback/resolve/{provider}/{media_id} (no GET)
