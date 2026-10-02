@@ -157,3 +157,75 @@ async def xtream_panel_api(
             "max_connections": 1,
         }
     }
+
+
+# ── Streaming endpoints (lo que la TV pide al reproducir) ──────────
+
+from fastapi.responses import RedirectResponse
+
+
+def _stream_id_to_media(index: int, media_type: str, catalog: list[MediaItem]) -> MediaItem | None:
+    """Busca el MediaItem por stream_id (índice 1-based + offset)."""
+    if media_type == "movie":
+        movies = [m for m in catalog if m.media_type == MediaType.MOVIE]
+        offset = 0  # stream_id = 1000 + index
+        for idx, item in enumerate(movies, 1):
+            if 1000 + idx == index:
+                return item
+    elif media_type == "series":
+        series = [m for m in catalog if m.media_type == MediaType.SERIES]
+        for idx, item in enumerate(series, 1):
+            if 2000 + idx == index:
+                return item
+    return None
+
+
+@router.get("/movie/{username}/{password}/{stream_id}.{ext}")
+async def stream_movie(
+    username: str,
+    password: str,
+    stream_id: int,
+    ext: str,
+    request: Request,
+    catalog_service: CatalogService = Depends(_get_catalog_service),
+):
+    """Reproduce una película VOD. Redirige al URL de playback real."""
+    catalog = await catalog_service.get_catalog("cuevana3")
+    media = _stream_id_to_media(stream_id, "movie", catalog)
+    if not media:
+        return {"error": "stream not found", "stream_id": stream_id}
+
+    result = await catalog_service.resolve_playback(media.provider, media.provider_id)
+    return RedirectResponse(url=result.url, status_code=302)
+
+
+@router.get("/series/{username}/{password}/{stream_id}/{episode}.{ext}")
+async def stream_series(
+    username: str,
+    password: str,
+    stream_id: int,
+    episode: str,
+    ext: str,
+    request: Request,
+    catalog_service: CatalogService = Depends(_get_catalog_service),
+):
+    """Reproduce un episodio de serie. Redirige al URL de playback real."""
+    catalog = await catalog_service.get_catalog("cuevana3")
+    media = _stream_id_to_media(stream_id, "series", catalog)
+    if not media:
+        return {"error": "stream not found", "stream_id": stream_id}
+
+    result = await catalog_service.resolve_playback(media.provider, media.provider_id)
+    return RedirectResponse(url=result.url, status_code=302)
+
+
+@router.get("/live/{username}/{password}/{stream_id}.{ext}")
+async def stream_live(
+    username: str,
+    password: str,
+    stream_id: int,
+    ext: str,
+    request: Request,
+):
+    """Stream de TV en vivo (no implementado aún)."""
+    return {"error": "live streaming not implemented"}
