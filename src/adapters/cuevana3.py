@@ -84,6 +84,12 @@ class Cuevana3Adapter(MediaProvider):
             title_text = link.get_text(strip=True)
             title, year = self._parse_title_and_year(title_text)
 
+            # Año: buscar en span.Year si no se encontró en el título
+            year_el = post.select_one("span.Year")
+            if year is None and year_el:
+                m = re.search(r"\b(19|20)\d{2}\b", year_el.get_text())
+                year = int(m.group(0)) if m else None
+
             # Imagen: figure.Objf img
             img_el = post.select_one("figure.Objf img") or post.find("img")
             poster_url = None
@@ -145,6 +151,12 @@ class Cuevana3Adapter(MediaProvider):
 
             title_text = link.get_text(strip=True)
             title, year = self._parse_title_and_year(title_text)
+
+            # Año: buscar en span.Year si no se encontró en el título
+            year_el = post.select_one("span.Year")
+            if year is None and year_el:
+                m = re.search(r"\b(19|20)\d{2}\b", year_el.get_text())
+                year = int(m.group(0)) if m else None
 
             img_el = post.select_one("figure.Objf img") or post.find("img")
             poster_url = None
@@ -319,7 +331,16 @@ class Cuevana3Adapter(MediaProvider):
 
         soup = BeautifulSoup(html, "lxml")
 
-        # 1. Buscar servidores en la lista ul/li con data-mdl o data-url (PRIORIDAD ALTA)
+        # 1. Buscar servidores en etiquetas li con data-server (NUEVO: estructura real)
+        li = soup.select_one("li[data-server]")
+        if li and li.get("data-server"):
+            return PlaybackDescriptor(
+                protocol="embed",
+                url=li["data-server"],
+                headers={"Referer": self._base},
+            )
+
+        # 2. Buscar servidores en la lista ul/li con data-mdl o data-url (PRIORIDAD ALTA)
         server_info = self._extract_server_from_list(soup)
         if server_info:
             return PlaybackDescriptor(
@@ -390,6 +411,11 @@ class Cuevana3Adapter(MediaProvider):
 
     @staticmethod
     def _extract_overview(soup) -> Optional[str]:
+        # Buscar sinopsis en div.Description p (NUEVO: estructura real)
+        desc = soup.select_one("div.Description p")
+        if desc:
+            return " ".join(desc.get_text(" ", strip=True).split())
+
         article = soup.find("article")
         if article:
             p = article.find("p")
