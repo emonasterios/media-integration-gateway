@@ -35,6 +35,22 @@ class CatalogCache:
         _ = media.sources
         return media
 
+    def get_by_source(self, provider: str, provider_id: str) -> Optional[Media]:
+        """Busca por la fuente (proveedor + id del proveedor), que es lo que conoce quien consulta."""
+        provider_name = provider.name if hasattr(provider, "name") else str(provider)
+        if ":" in provider_id:
+            provider_id = provider_id.split(":", 1)[1]
+        media = (
+            self.db.query(Media)
+            .join(Source, Source.media_id == Media.id)
+            .filter(Source.provider == provider_name, Source.url == provider_id)
+            .first()
+        )
+        if media is None or not self.is_valid(media):
+            return None
+        _ = media.sources
+        return media
+
     def save_media(self, item_data: dict, sources_data: list[dict]) -> Media:
         """Crea o actualiza el registro en Media con updated_at = datetime.utcnow(),
         sincroniza las sources asociadas y persiste con commit."""

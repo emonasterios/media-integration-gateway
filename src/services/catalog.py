@@ -93,19 +93,7 @@ class CatalogService:
         """Intenta obtener el elemento desde la caché."""
         if not _HAS_CACHE or self._cache is None:
             return None
-        
-        # Extraer el slug/título del media_id
-        # Formato típico: "cuevana3:slug" o similar
-        if ":" in media_id:
-            slug = media_id.split(":", 1)[1]
-        else:
-            slug = media_id
-        
-        # Buscar en caché usando el título (o podríamos usar provider_id)
-        media_type = self._get_media_type_from_provider_id(media_id)
-        media_type_str = media_type.value if media_type else None
-        
-        db_media = self._cache.get_media(slug, media_type_str)
+        db_media = self._cache.get_by_source(provider, media_id)
         if db_media:
             return self._convert_db_media_to_item(db_media, provider)
         return None

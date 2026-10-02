@@ -470,6 +470,21 @@ class TestCatalogCacheDirect:
         media = Media(title="Test", media_type="movie", updated_at=None)
         assert cache.is_valid(media) is False
 
+    def test_get_by_source(self, db_session):
+        """get_by_source retorna Media cuando existe source con provider y url."""
+        cache = CatalogCache(db_session, ttl_seconds=3600)
+        cache.save_media(
+            {"title": "La primera vez", "media_type": "movie"},
+            [{"provider": "cuevana3", "url": "la-primera-vez"}],
+        )
+
+        found = cache.get_by_source("cuevana3", "la-primera-vez")
+        assert found is not None
+        assert found.title == "La primera vez"
+
+        not_found = cache.get_by_source("cuevana3", "otra")
+        assert not_found is None
+
 
 class TestCacheWithTTLZero:
     """Tests con TTL = 0 (caché siempre expirada)."""

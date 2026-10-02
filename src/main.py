@@ -10,7 +10,9 @@ from fastapi import FastAPI
 from src.adapters.cuevana3 import Cuevana3Adapter
 from src.api.routes import router
 from src.core.config import settings
+from src.db.database import SessionLocal
 from src.services.catalog import CatalogService
+from src.services.cache import CatalogCache
 
 
 def create_app(override_catalog: Optional[CatalogService] = None) -> FastAPI:
@@ -23,12 +25,17 @@ def create_app(override_catalog: Optional[CatalogService] = None) -> FastAPI:
             app.dependency_overrides[_get_catalog] = lambda: override_catalog
             yield
         else:
+            from src.db.database import SessionLocal, init_db
+            from src.services.cache import CatalogCache
+            init_db()
+            db = SessionLocal()
             adapter = Cuevana3Adapter()
-            catalog = CatalogService(providers=[adapter])
+            catalog = CatalogService(providers=[adapter], cache=CatalogCache(db))
             from src.api.routes import _get_catalog
             app.dependency_overrides[_get_catalog] = lambda: catalog
             yield
             await adapter.close()
+            db.close()
 
     app = FastAPI(
         title=settings.app_name,
