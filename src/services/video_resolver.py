@@ -10,6 +10,7 @@ import time
 from typing import Optional
 
 import httpx
+from bs4 import BeautifulSoup
 
 from src.models.catalog import PlaybackDescriptor
 
@@ -21,6 +22,14 @@ DOODSTREAM_DOMAINS = (
     "d000d.com",
     "dood.yt",
     "dooood.com",
+)
+
+VOE_DOMAINS = (
+    "voe.sx",
+    "voe-unblock.com",
+    "voeunblock.com",
+    "voeunbl0ck.com",
+    "voeunblocker.com",
 )
 
 logger = logging.getLogger(__name__)
@@ -115,6 +124,91 @@ class VideoResolver:
             url=video_url,
             headers={"Referer": base_url},
         )
+
+    @staticmethod
+    def is_voe(url: str) -> bool:
+        """Verifica si la URL pertenece a un dominio Voe."""
+        url_lower = url.lower()
+        return any(domain in url_lower for domain in VOE_DOMAINS)
+
+    async def resolve_voe(self, embed_url: str) -> Optional[PlaybackDescriptor]:
+        """
+        Resuelve la URL de embed de Voe.sx a una URL de video directo (m3u8/mp4).
+        Usa FlareSolverr para bypass del anti-bot.
+        """
+        from src.services.flaresolverr import FlareSolverrClient
+
+        flaresolverr = FlareSolverrClient()
+        solution = flaresolverr.get_solution(embed_url, max_timeout=60000)
+        if not solution or not solution.get("response"):
+            logger.warning("FlareSolverr no pudo resolver %s", embed_url)
+            return None
+
+        html = solution["response"]
+        soup = BeautifulSoup(html, "lxml")
+
+        # Patrón 1: Buscar tag <source> o <video>
+        for source in soup.find_all("source"):
+            src = source.get("src", "")
+            if src and (src.endswith(".m3u8") or src.endswith(".mp4")):
+                protocol = "hls" if ".m3u8" in src else "mp4"
+                return PlaybackDescriptor(
+                    protocol=protocol,
+                    url=src,
+                    headers={"Referer": embed_url},
+                )
+
+        # Patrón 2: Buscar URLs en scripts (player config)
+        scripts = soup.find_all("script")
+        for script in scripts:
+            txt = script.get_text()
+            # Buscar m3u8
+            m3u8_match = re.search(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', txt)
+            if m3u8_match:
+                return PlaybackDescriptor(
+                    protocol="hls",
+                    url=m3u8_match.group(1),
+                    headers={"Referer": embed_url},
+                )
+            # Buscar mp4 directo
+            mp4_match = re.search(r'(https?://[^\s"\']+\.mp4[^\s"\']*)', txt)
+            if mp4_match:
+                return PlaybackDescriptor(
+                    protocol="mp4",
+                    url=mp4_match.group(1),
+                    headers={"Referer": embed_url},
+                )
+            # Buscar pattern file: 'url' o src: 'url'
+            file_match = re.search(r'''(?:file|src)\s*:\s*['"]([^'"]+)['"]''', txt)
+            if file_match:
+                url = file_match.group(1)
+                if url.startswith("http"):
+                    protocol = "hls" if ".m3u8" in url else "mp4"
+                    return PlaybackDescriptor(
+                        protocol=protocol,
+                        url=url,
+                        headers={"Referer": embed_url},
+                    )
+
+        # Patrón 3: Buscar variables de video ofuscadas
+        # Voe a veces usa variables como 'hls', 'videoSrc', etc.
+        for script in scripts:
+            txt = script.get_text()
+            # Buscar cualquier URL larga que parezca un CDN de video
+            cdn_matches = re.findall(
+                r'(https?://[a-zA-Z0-9.-]+\.[a-z]{2,}/[a-zA-Z0-9/_-]+\.(m3u8|mp4|m3u)[^\s"\']*)',
+                txt,
+            )
+            for url, ext in cdn_matches:
+                protocol = "hls" if ext in ("m3u8", "m3u") else "mp4"
+                return PlaybackDescriptor(
+                    protocol=protocol,
+                    url=url,
+                    headers={"Referer": embed_url},
+                )
+
+        logger.debug("No se encontró video directo en %s", embed_url)
+        return None
 
     async def close(self) -> None:
         """Cierra el cliente HTTP asíncrono."""

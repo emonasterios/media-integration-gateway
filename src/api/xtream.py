@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Optional
 
@@ -163,6 +164,8 @@ async def xtream_panel_api(
 
 from fastapi.responses import RedirectResponse
 
+logger = logging.getLogger(__name__)
+
 
 def _stream_id_to_media(index: int, media_type: str, catalog: list[MediaItem]) -> MediaItem | None:
     """Busca el MediaItem por stream_id (índice 1-based + offset)."""
@@ -189,13 +192,39 @@ async def stream_movie(
     ext: str = "mp4",
     catalog_service: CatalogService = Depends(_get_catalog_service),
 ):
-    """Reproduce una película VOD. Redirige al URL de playback real."""
+    """Reproduce una película VOD. Resuelve el video real y redirige o hace proxy."""
     catalog = await catalog_service.get_catalog("cuevana3")
     media = _stream_id_to_media(stream_id, "movie", catalog)
     if not media:
         return {"error": "stream not found", "stream_id": stream_id}
 
     result = await catalog_service.resolve_playback(media.provider, media.provider_id)
+
+    # Si es video directo (hls/mp4), redirigir
+    if result.protocol in ("hls", "mp4"):
+        return RedirectResponse(url=result.url, status_code=302)
+
+    # Si es embed HTML, intentar resolver el video real
+    if result.protocol == "embed":
+        from src.services.video_resolver import VideoResolver
+        resolver = VideoResolver()
+        try:
+            if VideoResolver.is_voe(result.url):
+                direct = await resolver.resolve_voe(result.url)
+                if direct and direct.protocol in ("hls", "mp4"):
+                    await resolver.close()
+                    return RedirectResponse(url=direct.url, status_code=302)
+            elif VideoResolver.is_doodstream(result.url):
+                direct = await resolver.resolve_doodstream(result.url)
+                if direct and direct.protocol in ("hls", "mp4"):
+                    await resolver.close()
+                    return RedirectResponse(url=direct.url, status_code=302)
+        except Exception as e:
+            logger.warning("Fallo resolviendo embed %s: %s", result.url, e)
+        finally:
+            await resolver.close()
+
+    # Fallback: redirigir al embed (la TV puede que no lo reproduzca)
     return RedirectResponse(url=result.url, status_code=302)
 
 

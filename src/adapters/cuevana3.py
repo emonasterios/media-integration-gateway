@@ -332,6 +332,13 @@ class Cuevana3Adapter(MediaProvider):
                     return direct
             except Exception as e:
                 logger.warning("Fallo resolviendo video directo de %s: %s", server_url, e)
+        elif VideoResolver.is_voe(server_url):
+            try:
+                direct = await self._video_resolver.resolve_voe(server_url)
+                if direct:
+                    return direct
+            except Exception as e:
+                logger.warning("Fallo resolviendo Voe %s: %s", server_url, e)
         return PlaybackDescriptor(
             protocol="embed",
             url=server_url,
