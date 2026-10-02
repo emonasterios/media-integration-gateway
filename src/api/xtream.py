@@ -181,12 +181,12 @@ def _stream_id_to_media(index: int, media_type: str, catalog: list[MediaItem]) -
 
 
 @router.get("/movie/{username}/{password}/{stream_id}.{ext}")
+@router.get("/movie/{username}/{password}/{stream_id}")
 async def stream_movie(
     username: str,
     password: str,
     stream_id: int,
-    ext: str,
-    request: Request,
+    ext: str = "mp4",
     catalog_service: CatalogService = Depends(_get_catalog_service),
 ):
     """Reproduce una película VOD. Redirige al URL de playback real."""
