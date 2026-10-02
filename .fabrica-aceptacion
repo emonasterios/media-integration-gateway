@@ -1,3 +1,4 @@
 # Qué significa "hecho" en este repo: el adapter funciona contra el sitio REAL.
 # Pasar pytest no basta (2026-10-01: 27 pruebas en verde y cero vídeos).
 cd /home/emon/media-integration-gateway && . .venv/bin/activate && python scripts/accept_cuevana3.py
+cd /home/emon/media-integration-gateway && . .venv/bin/activate && python scripts/accept_cache.py
