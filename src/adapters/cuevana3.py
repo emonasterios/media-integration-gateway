@@ -23,6 +23,7 @@ from src.models.catalog import (
     SearchResult,
 )
 from src.services.flaresolverr import FlareSolverrClient
+from src.services.video_resolver import VideoResolver
 
 BASE_URL = "https://cuevana3i.cc"
 
@@ -48,6 +49,7 @@ class Cuevana3Adapter(MediaProvider):
             },
         )
         self._flaresolverr = FlareSolverrClient()
+        self._video_resolver = VideoResolver()
 
     @property
     def name(self) -> str:
@@ -307,6 +309,20 @@ class Cuevana3Adapter(MediaProvider):
     # ------------------------------------------------------------------
     # Resolución de reproducción
     # ------------------------------------------------------------------
+    async def _build_playback_descriptor(self, server_url: str) -> PlaybackDescriptor:
+        if VideoResolver.is_doodstream(server_url):
+            try:
+                direct = await self._video_resolver.resolve_doodstream(server_url)
+                if direct:
+                    return direct
+            except Exception as e:
+                logger.warning("Fallo resolviendo video directo de %s: %s", server_url, e)
+        return PlaybackDescriptor(
+            protocol="embed",
+            url=server_url,
+            headers={"Referer": self._base},
+        )
+
     @staticmethod
     def _is_cloudflare_challenge(resp: httpx.Response | None, html: str | None) -> bool:
         """Detecta si la respuesta indica un desafío Cloudflare."""
@@ -390,39 +406,24 @@ class Cuevana3Adapter(MediaProvider):
         # 1. Buscar servidores en etiquetas li con data-server (NUEVO: estructura real)
         li = soup.select_one("li[data-server]")
         if li and li.get("data-server"):
-            return PlaybackDescriptor(
-                protocol="embed",
-                url=li["data-server"],
-                headers={"Referer": self._base},
-            )
+            return await self._build_playback_descriptor(li["data-server"])
 
         # 2. Buscar servidores en la lista ul/li con data-mdl o data-url (PRIORIDAD ALTA)
         server_info = self._extract_server_from_list(soup)
         if server_info:
-            return PlaybackDescriptor(
-                protocol="embed",
-                url=server_info["url"],
-                headers={"Referer": self._base},
-            )
+            return await self._build_playback_descriptor(server_info["url"])
 
-        # 2. Buscar en scripts inline (data-url, onclick, etc.)
+        # 3. Buscar en scripts inline (data-url, onclick, etc.)
         server_url = self._extract_server_from_scripts(soup)
         if server_url:
-            return PlaybackDescriptor(
-                protocol="embed",
-                url=server_url,
-                headers={"Referer": self._base},
-            )
+            return await self._build_playback_descriptor(server_url)
 
-        # 3. Fallback: buscar cualquier enlace a servidor conocido
+        # 4. Fallback: buscar cualquier enlace a servidor conocido
         for link in soup.find_all("a", href=True):
             href = link["href"]
             if self._is_known_server(href):
-                return PlaybackDescriptor(
-                    protocol="embed",
-                    url=urljoin(self._base, href) if not href.startswith("http") else href,
-                    headers={"Referer": self._base},
-                )
+                server_url = urljoin(self._base, href) if not href.startswith("http") else href
+                return await self._build_playback_descriptor(server_url)
 
         logger.debug("No se encontró fuente de reproducción para %s. HTML: %s", media_id, soup.prettify()[:2000])
         raise ValueError(f"No se encontró fuente de reproducción para {media_id}")
@@ -632,4 +633,5 @@ class Cuevana3Adapter(MediaProvider):
         return None
 
     async def close(self) -> None:
+        await self._video_resolver.close()
         await self._client.aclose()

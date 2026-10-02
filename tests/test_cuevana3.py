@@ -487,5 +487,68 @@ async def test_media_item_structure(adapter):
         # poster_url puede ser None
 
 
+# ----------------------------------------------------------------------
+# Tests de integración con VideoResolver
+# ----------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_resolve_playback_direct_video_doodstream(adapter):
+    """Validar resolución directa de video Doodstream via VideoResolver."""
+    from unittest.mock import AsyncMock
+    
+    # Mockear el VideoResolver para devolver un PlaybackDescriptor directo
+    mock_direct = PlaybackDescriptor(
+        protocol="mp4",
+        url="https://cdn.example.com/video.mp4?token=abc&expiry=123",
+        headers={"Referer": "https://playmogo.com"},
+    )
+    adapter._video_resolver.resolve_doodstream = AsyncMock(return_value=mock_direct)
+    
+    # HTML con enlace a doodstream
+    adapter._client.get.return_value = MockResponse(PLAYBACK_HTML)
+
+    result = await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
+
+    assert isinstance(result, PlaybackDescriptor)
+    assert result.protocol == "mp4"
+    assert result.url == "https://cdn.example.com/video.mp4?token=abc&expiry=123"
+    assert result.headers.get("Referer") == "https://playmogo.com"
+    adapter._video_resolver.resolve_doodstream.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resolve_playback_doodstream_fallback_on_failure(adapter):
+    """Validar fallback a embed cuando VideoResolver devuelve None."""
+    from unittest.mock import AsyncMock
+    
+    # Mockear VideoResolver para devolver None (fallo en resolución directa)
+    adapter._video_resolver.resolve_doodstream = AsyncMock(return_value=None)
+    
+    # HTML con servidor Doodstream
+    adapter._client.get.return_value = MockResponse(PLAYBACK_HTML)
+
+    result = await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
+
+    assert isinstance(result, PlaybackDescriptor)
+    assert result.protocol == "embed"
+    assert "doodstream.com" in result.url
+    adapter._video_resolver.resolve_doodstream.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_adapter_close_closes_video_resolver(adapter):
+    """Validar que adapter.close() cierra el VideoResolver."""
+    from unittest.mock import AsyncMock
+    
+    # Mockear close del VideoResolver
+    adapter._video_resolver.close = AsyncMock()
+    # El cliente HTTP ya está mockeado en el fixture
+
+    await adapter.close()
+
+    adapter._video_resolver.close.assert_awaited_once()
+    adapter._client.aclose.assert_awaited_once()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
