@@ -5,6 +5,7 @@ Extrae películas y series del sitio mediante scraping HTTP + BeautifulSoup.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Optional
@@ -128,68 +129,82 @@ class Cuevana3Adapter(MediaProvider):
     # Catálogo
     # ------------------------------------------------------------------
     async def get_catalog(self, category: Optional[str] = None) -> list[MediaItem]:
-        """Lista películas o series recientes."""
+        """Lista películas o series recientes con paginación completa."""
         path = "/peliculas/" if not category else f"/genero/{category}/"
-        try:
-            resp = await self._client.get(path)
-            resp.raise_for_status()
-        except httpx.TimeoutException:
-            logger.warning("Timeout en catálogo %s", path)
-            return []
-        except httpx.HTTPError as e:
-            logger.warning("Error HTTP en catálogo %s: %s", path, e)
-            return []
+        all_items: list[MediaItem] = []
+        page = 1
+        max_pages = 20  # límite razonable (~1,500 items)
 
-        soup = BeautifulSoup(resp.text, "lxml")
+        while page <= max_pages:
+            page_path = path
+            if page > 1:
+                # Cuevana3 usa /peliculas/page/N/
+                base = path.rstrip("/")
+                page_path = f"{base}/page/{page}/"
 
-        posts = soup.select("div.TPost")
-        if not posts:
-            logger.debug("No se encontraron elementos div.TPost en la respuesta del catálogo")
-            return []
+            try:
+                resp = await self._client.get(page_path)
+                resp.raise_for_status()
+            except httpx.TimeoutException:
+                logger.warning("Timeout en catálogo página %d: %s", page, page_path)
+                break
+            except httpx.HTTPError as e:
+                logger.warning("Error HTTP en catálogo página %d: %s", page, e)
+                break
 
-        items: list[MediaItem] = []
-        for post in posts:
-            link = post.find("a", href=True)
-            if not link:
-                continue
+            soup = BeautifulSoup(resp.text, "lxml")
+            posts = soup.select("div.TPost")
+            if not posts:
+                logger.debug("No hay más posts en página %d, fin de paginación", page)
+                break
 
-            title_text = link.get_text(strip=True)
-            title, year = self._parse_title_and_year(title_text)
+            for post in posts:
+                link = post.find("a", href=True)
+                if not link:
+                    continue
 
-            # Año: buscar en span.Year si no se encontró en el título
-            year_el = post.select_one("span.Year")
-            if year is None and year_el:
-                m = re.search(r"\b(19|20)\d{2}\b", year_el.get_text())
-                year = int(m.group(0)) if m else None
+                title_text = link.get_text(strip=True)
+                title, year = self._parse_title_and_year(title_text)
 
-            img_el = post.select_one("figure.Objf img") or post.find("img")
-            poster_url = None
-            if img_el:
-                src = img_el.get("src")
-                # Si src es placeholder SVG (data:image), intentar data-src
-                if src and src.startswith("data:"):
-                    src = img_el.get("data-src")
-                if src and not src.startswith("data:"):
-                    poster_url = urljoin(self._base, src) if not src.startswith("http") else src
+                year_el = post.select_one("span.Year")
+                if year is None and year_el:
+                    m = re.search(r"\b(19|20)\d{2}\b", year_el.get_text())
+                    year = int(m.group(0)) if m else None
 
-            provider_id = self._slug_from_url(link["href"])
-            # Determinar tipo por URL
-            media_type = MediaType.SERIES if "/serie/" in link["href"] else MediaType.MOVIE
+                img_el = post.select_one("figure.Objf img") or post.find("img")
+                poster_url = None
+                if img_el:
+                    src = img_el.get("src")
+                    if src and src.startswith("data:"):
+                        src = img_el.get("data-src")
+                    if src and not src.startswith("data:"):
+                        poster_url = urljoin(self._base, src) if not src.startswith("http") else src
 
-            items.append(
-                MediaItem(
-                    media_id=f"cuevana3:{provider_id}",
-                    title=title,
-                    media_type=media_type,
-                    year=year,
-                    poster_url=poster_url,
-                    overview=None,
-                    provider=self.name,
-                    provider_id=provider_id,
+                provider_id = self._slug_from_url(link["href"])
+                media_type = MediaType.SERIES if "/serie/" in link["href"] else MediaType.MOVIE
+
+                all_items.append(
+                    MediaItem(
+                        media_id=f"cuevana3:{provider_id}",
+                        title=title,
+                        media_type=media_type,
+                        year=year,
+                        poster_url=poster_url,
+                        overview=None,
+                        provider=self.name,
+                        provider_id=provider_id,
+                    )
                 )
-            )
 
-        return items
+            logger.info("Página %d: %d items (total acumulado: %d)", page, len(posts), len(all_items))
+
+            # Delay entre páginas para no ser baneado
+            await asyncio.sleep(1)
+
+            page += 1
+
+        logger.info("Catálogo completo: %d items en %d páginas", len(all_items), page - 1)
+        return all_items
 
     # ------------------------------------------------------------------
     # Detalles
