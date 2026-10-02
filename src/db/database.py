@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import declarative_base
 
 from src.core.config import settings
 
@@ -16,20 +16,26 @@ connect_args = (
     else {}
 )
 
-engine = create_engine(settings.DATABASE_URL, connect_args=connect_args)
+# Convert sqlite:/// to sqlite+aiosqlite:/// for async
+database_url = settings.DATABASE_URL
+if database_url.startswith("sqlite:///") and "aiosqlite" not in database_url:
+    database_url = database_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+engine = create_async_engine(database_url, connect_args=connect_args)
+
+AsyncSessionLocal = async_sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-def get_db():
-    """Generador de sesión de base de datos para dependencia de FastAPI."""
-    db = SessionLocal()
+async def get_db():
+    """Generador de sesión async de base de datos para dependencia de FastAPI."""
+    db = AsyncSessionLocal()
     try:
         yield db
     finally:
-        db.close()
+        await db.close()
 
 
-def init_db():
+async def init_db():
     """Inicializa la base de datos creando todas las tablas."""
-    Base.metadata.create_all(bind=engine)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)

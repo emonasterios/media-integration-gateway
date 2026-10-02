@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.database import get_db
 from src.db.models import Media
@@ -57,11 +58,13 @@ def _get_group_title(media_type: MediaType) -> str:
 @router.get("/playlist.m3u")
 async def get_m3u_playlist(
     request: Request,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """Genera playlist M3U a partir de los elementos cacheados en la base de datos."""
     # Obtener todos los elementos de media cacheados (con sources cargados)
-    db_media_list = db.query(Media).all()
+    stmt = select(Media)
+    result = await db.execute(stmt)
+    db_media_list = result.scalars().all()
 
     base_url = str(request.base_url).rstrip("/")
     if not base_url or base_url == "http://localhost":
@@ -71,7 +74,7 @@ async def get_m3u_playlist(
 
     for db_media in db_media_list:
         # Cargar sources si no están cargados
-        _ = db_media.sources
+        await db.refresh(db_media, ["sources"])
         
         if not db_media.sources:
             continue

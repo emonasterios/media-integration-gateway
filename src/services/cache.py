@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy import select, delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.core.config import settings
 from src.db.models import Media, Source
@@ -14,16 +16,17 @@ from src.db.models import Media, Source
 class CatalogCache:
     """Caché de catálogo con TTL configurable usando la base de datos."""
 
-    def __init__(self, db: Session, ttl_seconds: int = settings.CACHE_TTL_SECONDS) -> None:
+    def __init__(self, db: AsyncSession, ttl_seconds: int = settings.CACHE_TTL_SECONDS) -> None:
         self.db = db
         self.ttl_seconds = ttl_seconds
 
-    def get_media(self, title: str, media_type: Optional[str] = None) -> Optional[Media]:
+    async def get_media(self, title: str, media_type: Optional[str] = None) -> Optional[Media]:
         """Busca en la tabla media. Si existe y no ha expirado, retorna la entidad con sus sources."""
-        query = self.db.query(Media).filter(Media.title == title)
+        stmt = select(Media).filter(Media.title == title)
         if media_type:
-            query = query.filter(Media.media_type == media_type)
-        media = query.first()
+            stmt = stmt.filter(Media.media_type == media_type)
+        result = await self.db.execute(stmt)
+        media = result.scalar_one_or_none()
 
         if media is None:
             return None
@@ -31,37 +34,41 @@ class CatalogCache:
         if not self.is_valid(media):
             return None
 
-        # Cargar sources explícitamente
-        _ = media.sources
+        # Cargar sources explícitamente sin refresh
+        stmt = select(Media).options(selectinload(Media.sources)).where(Media.id == media.id)
+        result = await self.db.execute(stmt)
+        media = result.scalar_one()
         return media
 
-    def get_by_source(self, provider: str, provider_id: str) -> Optional[Media]:
-        """Busca por la fuente (proveedor + id del proveedor), que es lo que conoce quien consulta."""
+    async def get_by_source(self, provider: str, provider_id: str) -> Optional[Media]:
+        """Busca por la fuente (proveedor + id del proveedor)."""
         provider_name = provider.name if hasattr(provider, "name") else str(provider)
         if ":" in provider_id:
             provider_id = provider_id.split(":", 1)[1]
-        media = (
-            self.db.query(Media)
+        stmt = (
+            select(Media)
+            .options(selectinload(Media.sources))
             .join(Source, Source.media_id == Media.id)
             .filter(Source.provider == provider_name, Source.url == provider_id)
-            .first()
         )
+        result = await self.db.execute(stmt)
+        media = result.scalar_one_or_none()
         if media is None or not self.is_valid(media):
             return None
-        _ = media.sources
         return media
 
-    def save_media(self, item_data: dict, sources_data: list[dict]) -> Media:
+    async def save_media(self, item_data: dict, sources_data: list[dict]) -> Media:
         """Crea o actualiza el registro en Media con updated_at = datetime.utcnow(),
         sincroniza las sources asociadas y persiste con commit."""
         title = item_data.get("title")
         media_type = item_data.get("media_type")
 
         # Buscar existente
-        existing = self.db.query(Media).filter(Media.title == title)
+        stmt = select(Media).filter(Media.title == title)
         if media_type:
-            existing = existing.filter(Media.media_type == media_type)
-        existing = existing.first()
+            stmt = stmt.filter(Media.media_type == media_type)
+        result = await self.db.execute(stmt)
+        existing = result.scalar_one_or_none()
 
         now = datetime.utcnow()
 
@@ -76,16 +83,19 @@ class CatalogCache:
             # Crear nuevo
             media = Media(**item_data, created_at=now, updated_at=now)
             self.db.add(media)
-            self.db.flush()  # Para obtener el ID
+            await self.db.flush()  # Para obtener el ID
 
         # Sincronizar sources: borrar las antiguas y crear las nuevas
-        self.db.query(Source).filter(Source.media_id == media.id).delete()
+        await self.db.execute(delete(Source).filter(Source.media_id == media.id))
         for src in sources_data:
             source = Source(media_id=media.id, **src)
             self.db.add(source)
 
-        self.db.commit()
-        self.db.refresh(media)
+        await self.db.commit()
+        # Recargar con sources sin usar refresh (evita MissingGreenlet)
+        stmt = select(Media).options(selectinload(Media.sources)).where(Media.id == media.id)
+        result = await self.db.execute(stmt)
+        media = result.scalar_one()
         return media
 
     def is_valid(self, media: Media) -> bool:

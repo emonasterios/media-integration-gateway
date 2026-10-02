@@ -14,12 +14,12 @@ from src.models.catalog import (
 
 # Import condicional para evitar dependencia dura si no se usa cache
 try:
-    from src.db.database import SessionLocal
+    from src.db.database import AsyncSessionLocal
     from src.services.cache import CatalogCache
     _HAS_CACHE = True
 except ImportError:
     CatalogCache = None  # type: ignore
-    SessionLocal = None  # type: ignore
+    AsyncSessionLocal = None  # type: ignore
     _HAS_CACHE = False
 
 
@@ -93,7 +93,7 @@ class CatalogService:
         """Intenta obtener el elemento desde la caché."""
         if not _HAS_CACHE or self._cache is None:
             return None
-        db_media = self._cache.get_by_source(provider, media_id)
+        db_media = await self._cache.get_by_source(provider, media_id)
         if db_media:
             return self._convert_db_media_to_item(db_media, provider)
         return None
@@ -119,7 +119,7 @@ class CatalogService:
             "language": "es",
         }]
         
-        self._cache.save_media(item_data, sources_data)
+        await self._cache.save_media(item_data, sources_data)
 
     async def search(self, query: str, provider: str | None = None) -> list[SearchResult]:
         """Buscar en uno o todos los proveedores."""
