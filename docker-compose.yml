@@ -18,5 +18,14 @@ services:
       retries: 3
       start_period: 10s
 
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    ports:
+      - "8191:8191"
+    environment:
+      - LOG_LEVEL=info
+
 volumes:
   gateway-data:

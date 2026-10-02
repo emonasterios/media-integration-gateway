@@ -279,14 +279,14 @@ async def test_get_details_series(adapter):
         call_count[0] += 1
         if "/pelicula/" in url:
             return MockResponse("<html><body>Not found</body></html>", 404)
-        return MockResponse(DETAIL_HTML)
+        return MockResponse(series_html)
     
     adapter._client.get.side_effect = mock_get
 
     item = await adapter.get_details("cuevana3:serie-prueba-2026")
 
     assert item.media_type == MediaType.SERIES
-    assert item.title == "Pelicula Prueba 2026"
+    assert item.title == "Serie Prueba 2026"
 
 
 @pytest.mark.asyncio
@@ -455,14 +455,14 @@ async def test_timeout_handling_all_methods(adapter):
     with pytest.raises(ValueError, match="Timeout resolviendo reproducción"):
         await adapter.resolve_playback("cuevana3:test")
 
-    # get_seasons - NO captura timeout, propaga la excepción
+    # get_seasons - ahora captura timeout vía _fetch_with_flare_fallback y devuelve []
     adapter._client.get.side_effect = httpx.TimeoutException("Timeout")
-    with pytest.raises(httpx.TimeoutException):
-        await adapter.get_seasons("cuevana3:serie-test")
+    seasons = await adapter.get_seasons("cuevana3:serie-test")
+    assert seasons == []
 
-    # get_episodes - NO captura timeout, propaga la excepción
-    with pytest.raises(httpx.TimeoutException):
-        await adapter.get_episodes("cuevana3:serie-test", 1)
+    # get_episodes - ahora captura timeout vía _fetch_with_flare_fallback y devuelve []
+    episodes = await adapter.get_episodes("cuevana3:serie-test", 1)
+    assert episodes == []
 
 
 # ----------------------------------------------------------------------

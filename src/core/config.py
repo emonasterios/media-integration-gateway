@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     allowed_origins: list[str] = Field(default_factory=lambda: ["*"])
     DATABASE_URL: str = "sqlite:///./media_gateway.db"
     CACHE_TTL_SECONDS: int = 3600
+    FLARESOLVERR_URL: str = "http://flaresolverr:8191"
 
 
 settings = Settings()

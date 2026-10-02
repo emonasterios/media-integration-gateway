@@ -22,6 +22,7 @@ from src.models.catalog import (
     Season,
     SearchResult,
 )
+from src.services.flaresolverr import FlareSolverrClient
 
 BASE_URL = "https://cuevana3i.cc"
 
@@ -46,6 +47,7 @@ class Cuevana3Adapter(MediaProvider):
                 "Accept-Language": "es-ES,es;q=0.9",
             },
         )
+        self._flaresolverr = FlareSolverrClient()
 
     @property
     def name(self) -> str:
@@ -196,14 +198,10 @@ class Cuevana3Adapter(MediaProvider):
         media_type = MediaType.MOVIE
 
         for prefix, mtype in (("pelicula", MediaType.MOVIE), ("serie", MediaType.SERIES)):
-            try:
-                resp = await self._client.get(f"/{prefix}/{slug}/")
-                if resp.status_code == 200:
-                    html = resp.text
-                    media_type = mtype
-                    break
-            except (httpx.RequestError, httpx.HTTPError):
-                continue
+            html, resp = await self._fetch_with_flare_fallback(f"/{prefix}/{slug}/")
+            if html is not None:
+                media_type = mtype
+                break
 
         if html is None:
             raise ValueError(f"Timeout accediendo a {media_id}")
@@ -243,9 +241,10 @@ class Cuevana3Adapter(MediaProvider):
     async def get_seasons(self, media_id: str) -> list[Season]:
         """Cuevana3 no expone temporadas de forma estructurada; se parsean de la página."""
         slug = media_id.replace("cuevana3:", "")
-        resp = await self._client.get(f"/serie/{slug}/")
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
+        html, resp = await self._fetch_with_flare_fallback(f"/serie/{slug}/")
+        if html is None:
+            return []
+        soup = BeautifulSoup(html, "lxml")
 
         seasons: list[Season] = []
         # Buscar selector de temporada (suelen ser select o lista de temporadas)
@@ -282,9 +281,10 @@ class Cuevana3Adapter(MediaProvider):
         self, media_id: str, season_number: int
     ) -> list[Episode]:
         slug = media_id.replace("cuevana3:", "")
-        resp = await self._client.get(f"/serie/{slug}/")
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
+        html, resp = await self._fetch_with_flare_fallback(f"/serie/{slug}/")
+        if html is None:
+            return []
+        soup = BeautifulSoup(html, "lxml")
 
         episodes: list[Episode] = []
         # Buscar enlaces de episodios: patrón /serie/{slug}/temporada-{N}-capitulo-{M}/
@@ -307,24 +307,80 @@ class Cuevana3Adapter(MediaProvider):
     # ------------------------------------------------------------------
     # Resolución de reproducción
     # ------------------------------------------------------------------
+    @staticmethod
+    def _is_cloudflare_challenge(resp: httpx.Response | None, html: str | None) -> bool:
+        """Detecta si la respuesta indica un desafío Cloudflare."""
+        if resp is not None and resp.status_code in (403, 503):
+            return True
+        if html is None:
+            return False
+        html_lower = html.lower()
+        cf_markers = [
+            "just a moment...",
+            "cf-browser-verification",
+            "<title>attention required! | cloudflare</title>",
+            "cf-challenge-running",
+            "cloudflare-ray-id",
+        ]
+        return any(marker in html_lower for marker in cf_markers)
+
+    async def _fetch_with_flare_fallback(self, path: str) -> tuple[str | None, httpx.Response | None]:
+        """Intenta obtener contenido con httpx, y si hay challenge Cloudflare usa FlareSolverr como fallback."""
+        url = urljoin(self._base, path)
+        
+        # Primer intento con httpx estándar
+        try:
+            resp = await self._client.get(path)
+            if resp.status_code >= 400:
+                # Status code de error (4xx, 5xx) -> no es contenido válido
+                logger.warning("HTTP %d en %s", resp.status_code, url)
+                return None, resp
+            html = resp.text
+            if not self._is_cloudflare_challenge(resp, html):
+                return html, resp
+            logger.info("Cloudflare challenge detectado en %s, intentando FlareSolverr", url)
+        except (httpx.TimeoutException, httpx.HTTPError) as e:
+            logger.warning("Error HTTP/Timeout en %s: %s", url, e)
+            html = None
+            resp = None
+        
+        # Fallback a FlareSolverr
+        try:
+            solution = self._flaresolverr.get_solution(url)
+            if solution and solution.get("response"):
+                logger.info("FlareSolverr resolvió challenge para %s", url)
+                return solution["response"], None
+            elif solution and solution.get("cookies"):
+                # Si solo hay cookies, hacer request con ellas
+                cookies = solution["cookies"]
+                try:
+                    resp2 = await self._client.get(path, cookies=cookies)
+                    html2 = resp2.text
+                    if not self._is_cloudflare_challenge(resp2, html2):
+                        return html2, resp2
+                except (httpx.TimeoutException, httpx.HTTPError):
+                    pass
+        except Exception:
+            # FlareSolverr no disponible o falló - fallback silencioso
+            pass
+        
+        # Si todo falla, devolver lo que tengamos (puede ser None)
+        return html, resp
+
     async def resolve_playback(self, media_id: str) -> PlaybackDescriptor:
         """Navega a la página del título y extrae URLs de servidores (Doodstream, Voe, Vidhide).
         
         NO asumir que existe un iframe con src en el HTML estático inicial.
         Los servidores se cargan dinámicamente o sus identificadores residen en
-        atributos como data-mdl / scripts."""
+        atributos como data-mdl / scripts.
+        Integra FlareSolverr como bypass opcional para desafíos Cloudflare."""
         slug = media_id.removeprefix("cuevana3:")
         html = None
 
         for prefix in ("pelicula", "serie"):
-            try:
-                resp = await self._client.get(f"/{prefix}/{slug}/")
-                if resp.status_code == 200:
-                    html = resp.text
-                    break
-            except (httpx.TimeoutException, httpx.HTTPError) as e:
-                logger.warning("Error HTTP/Timeout resolviendo %s/%s: %s", prefix, slug, e)
-                continue
+            html, resp = await self._fetch_with_flare_fallback(f"/{prefix}/{slug}/")
+            if html is not None:
+                break
 
         if html is None:
             raise ValueError(f"Timeout resolviendo reproducción para {media_id}")
