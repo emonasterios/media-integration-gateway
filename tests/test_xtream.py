@@ -184,11 +184,11 @@ def test_player_api_get_vod_categories(client):
     r = client.get("/player_api.php?username=test&password=test&action=get_vod_categories")
     assert r.status_code == 200
     data = r.json()
-    assert "categories" in data
-    assert len(data["categories"]) == 1
-    assert data["categories"][0]["category_id"] == "1"
-    assert data["categories"][0]["category_name"] == "Peliculas"
-    assert data["categories"][0]["parent_id"] == 0
+    assert isinstance(data, list)
+    assert len(data) == 1
+    assert data[0]["category_id"] == "1"
+    assert data[0]["category_name"] == "Peliculas"
+    assert data[0]["parent_id"] == 0
 
 
 def test_player_api_get_series_categories(client):
@@ -196,11 +196,11 @@ def test_player_api_get_series_categories(client):
     r = client.get("/player_api.php?username=test&password=test&action=get_series_categories")
     assert r.status_code == 200
     data = r.json()
-    assert "categories" in data
-    assert len(data["categories"]) == 1
-    assert data["categories"][0]["category_id"] == "2"
-    assert data["categories"][0]["category_name"] == "Series"
-    assert data["categories"][0]["parent_id"] == 0
+    assert isinstance(data, list)
+    assert len(data) == 1
+    assert data[0]["category_id"] == "2"
+    assert data[0]["category_name"] == "Series"
+    assert data[0]["parent_id"] == 0
 
 
 def test_player_api_get_live_categories(client):
@@ -208,11 +208,11 @@ def test_player_api_get_live_categories(client):
     r = client.get("/player_api.php?username=test&password=test&action=get_live_categories")
     assert r.status_code == 200
     data = r.json()
-    assert "categories" in data
-    assert len(data["categories"]) == 1
-    assert data["categories"][0]["category_id"] == "3"
-    assert data["categories"][0]["category_name"] == "TV en Vivo"
-    assert data["categories"][0]["parent_id"] == 0
+    assert isinstance(data, list)
+    assert len(data) == 1
+    assert data[0]["category_id"] == "3"
+    assert data[0]["category_name"] == "TV en Vivo"
+    assert data[0]["parent_id"] == 0
 
 
 def test_player_api_get_live_streams(client):

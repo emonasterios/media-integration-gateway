@@ -107,13 +107,13 @@ async def xtream_player_api(
     }
 
     if action == "get_vod_categories":
-        return {"categories": [{"category_id": "1", "category_name": "Peliculas", "parent_id": 0}]}
+        return [{"category_id": "1", "category_name": "Peliculas", "parent_id": 0}]
 
     if action == "get_series_categories":
-        return {"categories": [{"category_id": "2", "category_name": "Series", "parent_id": 0}]}
+        return [{"category_id": "2", "category_name": "Series", "parent_id": 0}]
 
     if action == "get_live_categories":
-        return {"categories": [{"category_id": "3", "category_name": "TV en Vivo", "parent_id": 0}]}
+        return [{"category_id": "3", "category_name": "TV en Vivo", "parent_id": 0}]
 
     if action == "get_vod_streams":
         catalog = await catalog_service.get_catalog("cuevana3")
