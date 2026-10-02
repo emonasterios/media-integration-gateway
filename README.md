@@ -52,6 +52,4 @@ pytest
 uvicorn src.main:app --reload
 ```
 
-## Alcance
 
-Este proyecto está diseñado para contenido propio, autorizado, de dominio público o proveedores que permitan integración externa. La disponibilidad técnica de un stream no implica autorización para extraerlo, automatizarlo o retransmitirlo.
