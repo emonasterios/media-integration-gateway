@@ -96,8 +96,12 @@ class MockResponse:
 def resolver():
     """Fixture que provee un VideoResolver con cliente mockeado."""
     resolver = VideoResolver()
-    # Reemplazar el cliente HTTP con un mock
-    resolver._client = AsyncMock()
+    # Reemplazar el cliente HTTP con un mock que tenga headers
+    from unittest.mock import MagicMock
+    mock_client = AsyncMock()
+    mock_client.headers = MagicMock()
+    mock_client.headers.get = MagicMock(return_value="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    resolver._client = mock_client
     yield resolver
 
 

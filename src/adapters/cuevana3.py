@@ -241,6 +241,9 @@ class Cuevana3Adapter(MediaProvider):
         genres = self._extract_genres(soup)
         duration = self._extract_duration(soup)
         
+        # Idiomas disponibles
+        available_languages = self._extract_available_languages(soup)
+        
         return MediaItem(
             media_id=f"cuevana3:{slug}",
             title=title or slug,
@@ -250,6 +253,7 @@ class Cuevana3Adapter(MediaProvider):
             overview=overview,
             provider=self.name,
             provider_id=slug,
+            available_languages=available_languages,
         )
 
     # ------------------------------------------------------------------
@@ -583,6 +587,15 @@ class Cuevana3Adapter(MediaProvider):
             if alt:
                 return alt.lower()[:2]
         return None
+
+    def _extract_available_languages(self, soup) -> list[str]:
+        """Recopila todos los idiomas disponibles en los servidores de una película."""
+        languages = set()
+        for li in soup.select("ul li"):
+            lang = self._extract_server_language(li)
+            if lang:
+                languages.add(lang)
+        return sorted(languages)
 
     @staticmethod
     def _count_episodes(soup) -> int:

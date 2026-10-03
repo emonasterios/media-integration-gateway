@@ -156,6 +156,7 @@ class CuevanNetAdapter(MediaProvider):
             overview=overview,
             provider=self.name,
             provider_id=slug,
+            available_languages=["es"],
         )
 
     # ------------------------------------------------------------------

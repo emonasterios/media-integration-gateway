@@ -52,6 +52,10 @@ class MediaItem(BaseModel):
     external_id: Optional[str] = Field(
         default=None, description="IMDb, TMDb u otro identificador externo"
     )
+    available_languages: list[str] = Field(
+        default_factory=list,
+        description="Idiomas disponibles (es, en, pt, etc.)",
+    )
 
 
 class Season(BaseModel):

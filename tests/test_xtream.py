@@ -14,8 +14,8 @@ from src.models.catalog import MediaItem, MediaType, SearchResult, PlaybackDescr
 from src.api.xtream import _get_catalog_service
 
 
-class FakeProvider(MediaProvider):
-    """Proveedor fake para tests de Xtream."""
+class FakeCuevana3Provider(MediaProvider):
+    """Proveedor fake cuevana3 para tests de Xtream."""
 
     @property
     def name(self) -> str:
@@ -74,6 +74,46 @@ class FakeProvider(MediaProvider):
         ]
 
 
+class FakeCuevanNetProvider(MediaProvider):
+    """Proveedor fake cuevan_net para tests de Xtream (catálogo fusionado)."""
+
+    @property
+    def name(self) -> str:
+        return "cuevan_net"
+
+    async def search(self, query: str) -> SearchResult:
+        return SearchResult(items=[], total=0, query=query)
+
+    async def get_details(self, media_id: str) -> MediaItem:
+        return MediaItem(
+            media_id=f"cuevan_net:{media_id}", title="Test CN", media_type=MediaType.MOVIE,
+            provider="cuevan_net", provider_id=media_id,
+        )
+
+    async def get_seasons(self, media_id: str) -> list[Season]:
+        return []
+
+    async def get_episodes(self, media_id: str, season_number: int) -> list[Episode]:
+        return []
+
+    async def resolve_playback(self, media_id: str) -> PlaybackDescriptor:
+        return PlaybackDescriptor(protocol="hls", url="https://example.com/stream.m3u8")
+
+    async def get_catalog(self, category: str | None = None) -> list[MediaItem]:
+        return [
+            MediaItem(
+                media_id="cuevan_net:cn1",
+                title="Película CN 1",
+                media_type=MediaType.MOVIE,
+                provider="cuevan_net",
+                provider_id="cn1",
+                poster_url="https://example.com/cn1.jpg",
+                overview="Descripción CN 1",
+                year=2024,
+            ),
+        ]
+
+
 @pytest.fixture()
 def db_engine():
     """Crea un engine SQLite en memoria con StaticPool."""
@@ -90,7 +130,7 @@ def db_engine():
 @pytest.fixture()
 def app_with_db(db_engine):
     """App FastAPI con override de BD en memoria y catalog fake."""
-    svc = CatalogService(providers=[FakeProvider()])
+    svc = CatalogService(providers=[FakeCuevana3Provider(), FakeCuevanNetProvider()])
 
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
 

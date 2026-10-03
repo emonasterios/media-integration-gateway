@@ -192,7 +192,15 @@ def adapter():
 @pytest.mark.asyncio
 async def test_get_catalog_movies(adapter):
     """Validar que get_catalog extrae título, poster y slug correctamente."""
-    adapter._client.get.return_value = MockResponse(CATALOG_HTML)
+    # Mock: página 1 tiene items, página 2 vacía (fin de paginación)
+    call_count = [0]
+    async def mock_get(url, *args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return MockResponse(CATALOG_HTML)
+        return MockResponse("<html><body></body></html>")
+
+    adapter._client.get.side_effect = mock_get
 
     items = await adapter.get_catalog()
 
@@ -219,7 +227,14 @@ async def test_get_catalog_movies(adapter):
 @pytest.mark.asyncio
 async def test_get_catalog_with_category(adapter):
     """Validar get_catalog con categoría específica."""
-    adapter._client.get.return_value = MockResponse(CATALOG_HTML)
+    call_count = [0]
+    async def mock_get(url, *args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return MockResponse(CATALOG_HTML)
+        return MockResponse("<html><body></body></html>")
+
+    adapter._client.get.side_effect = mock_get
 
     items = await adapter.get_catalog(category="accion")
 

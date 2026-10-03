@@ -35,6 +35,7 @@ def _media_item_to_vod_stream(item: MediaItem, index: int) -> dict:
         "container_extension": "mp4",
         "custom_sid": "",
         "direct_source": "",
+        "available_languages": item.available_languages or [],
     }
 
 
@@ -130,6 +131,23 @@ async def xtream_player_api(
 
     if action == "get_live_streams":
         return []
+
+    # Búsqueda por nombre
+    if action == "search_vod":
+        query = request.query_params.get("query", "")
+        if not query:
+            return []
+        search_results = await catalog_service.search(query)
+        movies = [item for sr in search_results for item in sr.items if item.media_type == MediaType.MOVIE]
+        return [_media_item_to_vod_stream(item, idx) for idx, item in enumerate(movies, 1)]
+
+    if action == "search_series":
+        query = request.query_params.get("query", "")
+        if not query:
+            return []
+        search_results = await catalog_service.search(query)
+        series = [item for sr in search_results for item in sr.items if item.media_type == MediaType.SERIES]
+        return [_media_item_to_series_stream(item, idx) for idx, item in enumerate(series, 1)]
 
     # Sin action -> devolver cuenta completa
     return {"user_info": user_info, "server_info": server_info}
