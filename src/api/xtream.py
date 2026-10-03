@@ -220,18 +220,10 @@ async def stream_movie(
         finally:
             await resolver.close()
 
-    # Si es video directo (hls/mp4), hacer proxy con soporte de rangos
+    # Si es video directo (hls/mp4), redirigir al CDN
     if result.protocol in ("hls", "mp4"):
-        headers = {"Referer": result.headers.get("Referer", result.url)} if result.headers else {}
-        # Forward Range header si la TV lo envía
-        if request.headers.get("range"):
-            headers["Range"] = request.headers["range"]
-        return StreamingResponse(
-            _proxy_stream(result.url, headers),
-            media_type="video/mp4" if result.protocol == "mp4" else "application/vnd.apple.mpegurl",
-            status_code=206 if headers.get("Range") else 200,
-            headers={"Accept-Ranges": "bytes"} if result.protocol == "mp4" else {},
-        )
+        logger.info("Redirecting to direct %s URL: %s", result.protocol, result.url[:80])
+        return RedirectResponse(url=result.url, status_code=302)
 
     # Fallback: redirigir al embed
     return RedirectResponse(url=result.url, status_code=302)
