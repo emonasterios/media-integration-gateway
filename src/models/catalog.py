@@ -56,6 +56,14 @@ class MediaItem(BaseModel):
         default_factory=list,
         description="Idiomas disponibles (es, en, pt, etc.)",
     )
+    # Campos enriquecidos desde get_details
+    director: Optional[str] = None
+    cast: Optional[list[str]] = None
+    country: Optional[str] = None
+    trailer_url: Optional[str] = None
+    duration: Optional[str] = None
+    genres: list[str] = Field(default_factory=list)
+    rating: Optional[float] = None
 
 
 class Season(BaseModel):

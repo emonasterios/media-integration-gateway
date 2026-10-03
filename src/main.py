@@ -12,10 +12,13 @@ from src.adapters.cuevan_net import CuevanNetAdapter
 from src.api.routes import router
 from src.api.m3u import router as m3u_router
 from src.api.xtream import router as xtream_router
+from src.api.enrichment import router as enrichment_router
+from src.api.enrichment import _enricher as global_enricher
 from src.core.config import settings
 from src.db.database import AsyncSessionLocal
 from src.services.catalog import CatalogService
 from src.services.cache import CatalogCache
+from src.services.enrichment import CatalogEnricher
 
 
 def _build_app() -> FastAPI:
@@ -27,6 +30,7 @@ def _build_app() -> FastAPI:
     app.include_router(router)
     app.include_router(m3u_router)
     app.include_router(xtream_router)
+    app.include_router(enrichment_router)
 
     @app.get("/healthz")
     async def health():
@@ -54,6 +58,8 @@ def create_app(override_catalog: Optional[CatalogService] = None) -> FastAPI:
             adapter = Cuevana3Adapter()
             cuevan_net = CuevanNetAdapter()
             catalog = CatalogService(providers=[adapter, cuevan_net], cache=CatalogCache(db))
+            # Wire enricher
+            global_enricher.set_providers([adapter, cuevan_net])
             from src.api.routes import _get_catalog
             from src.api.xtream import _get_catalog_service as _xtream_get_catalog
             app.dependency_overrides[_get_catalog] = lambda: catalog
@@ -72,6 +78,7 @@ def create_app(override_catalog: Optional[CatalogService] = None) -> FastAPI:
     app.include_router(router)
     app.include_router(m3u_router)
     app.include_router(xtream_router)
+    app.include_router(enrichment_router)
 
     @app.get("/healthz")
     async def health():

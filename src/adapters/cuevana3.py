@@ -242,6 +242,13 @@ class Cuevana3Adapter(MediaProvider):
         genres = self._extract_genres(soup)
         duration = self._extract_duration(soup)
         
+        # Campos enriquecidos
+        director = self._extract_director(soup)
+        cast = self._extract_cast(soup)
+        country = self._extract_country(soup)
+        trailer = self._extract_trailer(soup)
+        rating = self._extract_rating(soup)
+        
         # Idiomas disponibles
         available_languages = self._extract_available_languages(soup)
         
@@ -255,6 +262,13 @@ class Cuevana3Adapter(MediaProvider):
             provider=self.name,
             provider_id=slug,
             available_languages=available_languages,
+            director=director,
+            cast=cast,
+            country=country,
+            trailer_url=trailer,
+            duration=duration,
+            genres=genres,
+            rating=rating,
         )
 
     # ------------------------------------------------------------------
@@ -601,6 +615,91 @@ class Cuevana3Adapter(MediaProvider):
     @staticmethod
     def _count_episodes(soup) -> int:
         return len(soup.select("a[href*='capitulo-']"))
+
+    # ------------------------------------------------------------------
+    # Métodos de extracción enriquecida
+    # ------------------------------------------------------------------
+    def _extract_director(self, soup) -> Optional[str]:
+        """Extrae el director de la página de detalle."""
+        for label in ["Director", "director"]:
+            el = soup.find(string=re.compile(label, re.I))
+            if el:
+                parent = el.find_parent(["div", "p", "li", "span"])
+                if parent:
+                    # Buscar el enlace o texto después del label
+                    a = parent.find("a")
+                    if a:
+                        return a.get_text(strip=True)
+                    # O el texto siguiente
+                    next_el = el.find_next_sibling(["a", "span"])
+                    if next_el:
+                        return next_el.get_text(strip=True)
+        return None
+
+    def _extract_cast(self, soup) -> list[str]:
+        """Extrae el reparto/actores de la página de detalle."""
+        cast = []
+        for label in ["Reparto", "Actores", "Cast", "Elenco"]:
+            el = soup.find(string=re.compile(label, re.I))
+            if el:
+                parent = el.find_parent(["div", "p", "li", "span"])
+                if parent:
+                    # Buscar todos los enlaces de actores
+                    for a in parent.find_all("a"):
+                        name = a.get_text(strip=True)
+                        if name and name not in cast:
+                            cast.append(name)
+                    # Si no hay enlaces, buscar texto separado por comas
+                    if not cast:
+                        text = parent.get_text()
+                        # Remover el label
+                        text = re.sub(r'^[^:]*:\s*', '', text)
+                        cast = [a.strip() for a in text.split(",") if a.strip()]
+                break
+        return cast
+
+    def _extract_country(self, soup) -> Optional[str]:
+        """Extrae el país de origen."""
+        for label in ["País", "Pais", "Country", "Origen"]:
+            el = soup.find(string=re.compile(label, re.I))
+            if el:
+                parent = el.find_parent(["div", "p", "li", "span"])
+                if parent:
+                    a = parent.find("a")
+                    if a:
+                        return a.get_text(strip=True)
+                    next_el = el.find_next_sibling(["a", "span"])
+                    if next_el:
+                        return next_el.get_text(strip=True)
+        return None
+
+    def _extract_trailer(self, soup) -> Optional[str]:
+        """Extrae la URL del tráiler si existe."""
+        # Buscar iframe de YouTube
+        iframe = soup.find("iframe", src=re.compile(r'youtube\.com|youtu\.be'))
+        if iframe:
+            return iframe.get("src")
+        # Buscar enlace con texto "Tráiler" o "Trailer"
+        for a in soup.find_all("a", string=re.compile(r'Trailer|Tráiler', re.I)):
+            href = a.get("href")
+            if href:
+                return href if href.startswith("http") else urljoin(self._base, href)
+        return None
+
+    def _extract_rating(self, soup) -> Optional[float]:
+        """Extrae la calificación/rating de la página."""
+        # Buscar elementos con clase rating, score, imdb
+        for cls in ["rating", "score", "imdb", "calificacion", "calificación"]:
+            el = soup.find(class_=re.compile(cls, re.I))
+            if el:
+                # Buscar número decimal
+                text = el.get_text()
+                match = re.search(r'(\d+\.?\d*)', text)
+                if match:
+                    val = float(match.group(1))
+                    if 0 <= val <= 10:
+                        return val
+        return None
 
     @staticmethod
     def _is_known_server(url: str) -> bool:

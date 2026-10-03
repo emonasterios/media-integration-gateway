@@ -146,6 +146,13 @@ class CuevanNetAdapter(MediaProvider):
         poster = self._extract_poster(soup)
         genres = self._extract_genres(soup)
         duration = self._extract_duration(soup)
+        
+        # Campos enriquecidos
+        director = self._extract_director(soup)
+        cast = self._extract_cast(soup)
+        country = self._extract_country(soup)
+        trailer = self._extract_trailer(soup)
+        rating = self._extract_rating(soup)
 
         return MediaItem(
             media_id=f"cuevan_net:{slug}",
@@ -157,6 +164,13 @@ class CuevanNetAdapter(MediaProvider):
             provider=self.name,
             provider_id=slug,
             available_languages=["es"],
+            director=director,
+            cast=cast,
+            country=country,
+            trailer_url=trailer,
+            duration=duration,
+            genres=genres,
+            rating=rating,
         )
 
     # ------------------------------------------------------------------
@@ -473,6 +487,79 @@ class CuevanNetAdapter(MediaProvider):
                 if text:
                     genres.append(text)
         return genres
+
+    @staticmethod
+    def _extract_director(soup: BeautifulSoup) -> Optional[str]:
+        for label in ["Director", "director"]:
+            el = soup.find(string=re.compile(label, re.I))
+            if el:
+                parent = el.find_parent(["div", "p", "li", "span"])
+                if parent:
+                    a = parent.find("a")
+                    if a:
+                        return a.get_text(strip=True)
+                    next_el = el.find_next_sibling(["a", "span"])
+                    if next_el:
+                        return next_el.get_text(strip=True)
+        return None
+
+    @staticmethod
+    def _extract_cast(soup: BeautifulSoup) -> list[str]:
+        cast = []
+        for label in ["Reparto", "Actores", "Cast", "Elenco"]:
+            el = soup.find(string=re.compile(label, re.I))
+            if el:
+                parent = el.find_parent(["div", "p", "li", "span"])
+                if parent:
+                    for a in parent.find_all("a"):
+                        name = a.get_text(strip=True)
+                        if name and name not in cast:
+                            cast.append(name)
+                    if not cast:
+                        text = parent.get_text()
+                        text = re.sub(r'^[^:]*:\s*', '', text)
+                        cast = [a.strip() for a in text.split(",") if a.strip()]
+                break
+        return cast
+
+    @staticmethod
+    def _extract_country(soup: BeautifulSoup) -> Optional[str]:
+        for label in ["País", "Pais", "Country", "Origen"]:
+            el = soup.find(string=re.compile(label, re.I))
+            if el:
+                parent = el.find_parent(["div", "p", "li", "span"])
+                if parent:
+                    a = parent.find("a")
+                    if a:
+                        return a.get_text(strip=True)
+                    next_el = el.find_next_sibling(["a", "span"])
+                    if next_el:
+                        return next_el.get_text(strip=True)
+        return None
+
+    @staticmethod
+    def _extract_trailer(soup: BeautifulSoup) -> Optional[str]:
+        iframe = soup.find("iframe", src=re.compile(r'youtube\.com|youtu\.be'))
+        if iframe:
+            return iframe.get("src")
+        for a in soup.find_all("a", string=re.compile(r'Trailer|Tráiler', re.I)):
+            href = a.get("href")
+            if href:
+                return href if href.startswith("http") else href
+        return None
+
+    @staticmethod
+    def _extract_rating(soup: BeautifulSoup) -> Optional[float]:
+        for cls in ["rating", "score", "imdb", "calificacion", "calificación"]:
+            el = soup.find(class_=re.compile(cls, re.I))
+            if el:
+                text = el.get_text()
+                match = re.search(r'(\d+\.?\d*)', text)
+                if match:
+                    val = float(match.group(1))
+                    if 0 <= val <= 10:
+                        return val
+        return None
 
     async def close(self) -> None:
         await self._video_resolver.close()
