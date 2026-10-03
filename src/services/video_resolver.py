@@ -71,11 +71,17 @@ class VideoResolver:
     async def _validate_video_url(self, video_url: str, headers: dict) -> bool:
         """Verifica que la URL devuelva realmente video (no HTML/403)."""
         try:
-            resp = await self._client.head(
-                video_url,
-                headers=headers,
-                follow_redirects=True,
-            )
+            # CDNs de streaming suelen tener certs expirados — crear cliente sin verificación
+            import ssl
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            async with httpx.AsyncClient(verify=ssl_context) as verify_client:
+                resp = await verify_client.head(
+                    video_url,
+                    headers=headers,
+                    follow_redirects=True,
+                )
             ct = resp.headers.get("content-type", "").lower()
             # Aceptar tipos de video reales
             valid_types = [
