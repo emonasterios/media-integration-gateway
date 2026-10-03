@@ -256,6 +256,8 @@ def _stream_id_to_media(index: int, media_type: str, catalog: list[MediaItem]) -
     return None
 
 
+@router.head("/movie/{username}/{password}/{stream_id}")
+@router.head("/movie/{username}/{password}/{stream_id}.{ext}")
 @router.get("/movie/{username}/{password}/{stream_id}")
 @router.get("/movie/{username}/{password}/{stream_id}.{ext}")
 async def stream_movie(
