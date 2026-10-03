@@ -191,7 +191,6 @@ async def stream_movie(
     password: str,
     stream_id: int,
     ext: str = "mp4",
-    request: Request | None = None,
     catalog_service: CatalogService = Depends(_get_catalog_service),
 ):
     """Reproduce una película VOD. Hace proxy del video real a la TV."""
