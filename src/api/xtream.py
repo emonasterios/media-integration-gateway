@@ -76,7 +76,9 @@ async def xtream_player_api(
         return {"user_info": {"auth": 0}, "server_info": {}}
 
     public_host = request.url.hostname or "localhost"
-    public_port = request.url.port or (443 if request.url.scheme == "https" else 80)
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+    public_scheme = forwarded_proto if forwarded_proto in {"http", "https"} else request.url.scheme
+    public_port = request.url.port or (443 if public_scheme == "https" else 80)
     now = datetime.now()
     timestamp_now = str(int(now.timestamp()))
     time_now = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -100,8 +102,8 @@ async def xtream_player_api(
         # internal port makes some TVs reject the playlist.
         "url": public_host,
         "port": str(public_port),
-        "https_port": "",
-        "server_protocol": request.url.scheme,
+        "https_port": str(public_port) if public_scheme == "https" else "",
+        "server_protocol": public_scheme,
         "rtmp_port": "",
         "timezone": "America/Caracas",
         "timestamp_now": timestamp_now,

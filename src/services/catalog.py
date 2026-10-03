@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 from src.adapters.base import MediaProvider
 from src.models.catalog import (
     Episode,
@@ -30,9 +33,13 @@ class CatalogService:
         self,
         providers: list[MediaProvider],
         cache: CatalogCache | None = None,
+        catalog_ttl_seconds: int = 3600,
     ) -> None:
         self._providers = {p.name: p for p in providers}
         self._cache = cache
+        self._catalog_ttl_seconds = catalog_ttl_seconds
+        self._catalog_cache: dict[tuple[str, str | None], tuple[float, list[MediaItem]]] = {}
+        self._catalog_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
 
     @property
     def provider_names(self) -> list[str]:
@@ -177,6 +184,18 @@ class CatalogService:
     async def get_catalog(
         self, provider: str, category: str | None = None
     ) -> list[MediaItem]:
-        # Para get_catalog, no usamos caché por ahora ya que devuelve listas
-        # y la lógica de TTL sería más compleja (invalidar toda la lista)
-        return await self.get_provider(provider).get_catalog(category)
+        key = (provider, category)
+        now = time.monotonic()
+        cached = self._catalog_cache.get(key)
+        if cached is not None and now - cached[0] < self._catalog_ttl_seconds:
+            return cached[1]
+
+        lock = self._catalog_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            cached = self._catalog_cache.get(key)
+            if cached is not None and now - cached[0] < self._catalog_ttl_seconds:
+                return cached[1]
+            catalog = await self.get_provider(provider).get_catalog(category)
+            self._catalog_cache[key] = (time.monotonic(), catalog)
+            return catalog

@@ -219,6 +219,23 @@ def test_player_api_advertises_external_host_and_port(client):
     assert server_info["server_protocol"] == "http"
 
 
+def test_player_api_honors_forwarded_https(client):
+    """Xtream anuncia HTTPS cuando un proxy TLS termina la conexión."""
+    r = client.get(
+        "/player_api.php?username=test&password=test",
+        headers={
+            "host": "codeserver.example.ts.net:9446",
+            "x-forwarded-proto": "https",
+        },
+    )
+    assert r.status_code == 200
+    server_info = r.json()["server_info"]
+    assert server_info["url"] == "codeserver.example.ts.net"
+    assert server_info["port"] == "9446"
+    assert server_info["https_port"] == "9446"
+    assert server_info["server_protocol"] == "https"
+
+
 def test_player_api_get_vod_categories(client):
     """GET /player_api.php?action=get_vod_categories responde con categoría Películas."""
     r = client.get("/player_api.php?username=test&password=test&action=get_vod_categories")

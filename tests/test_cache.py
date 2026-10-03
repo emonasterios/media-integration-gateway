@@ -57,6 +57,26 @@ class TestCacheHit:
     """Tests de HIT de caché: contenido en DB y dentro del TTL."""
 
     @pytest.mark.asyncio
+    async def test_get_catalog_reuses_full_catalog_within_ttl(self, mock_provider):
+        item = MediaItem(
+            media_id="test_provider:cached-catalog",
+            title="Cached Catalog",
+            media_type=MediaType.MOVIE,
+            provider="test_provider",
+            provider_id="cached-catalog",
+        )
+        mock_provider.get_catalog.return_value = [item]
+        service = CatalogService(
+            providers=[mock_provider], catalog_ttl_seconds=3600
+        )
+
+        first = await service.get_catalog("test_provider")
+        second = await service.get_catalog("test_provider")
+
+        assert first == second == [item]
+        mock_provider.get_catalog.assert_awaited_once_with(None)
+
+    @pytest.mark.asyncio
     async def test_get_details_cache_hit_returns_db_content(self, catalog_service, mock_provider, db_session):
         """Cuando un medio existe en DB y no ha expirado, se retorna desde DB sin invocar adapter."""
         now = datetime.utcnow()
