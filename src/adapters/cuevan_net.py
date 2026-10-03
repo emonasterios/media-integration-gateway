@@ -373,6 +373,7 @@ class CuevanNetAdapter(MediaProvider):
                     overview=None,
                     provider=self.name,
                     provider_id=provider_id,
+                    available_languages=["es"],
                 )
             )
 

@@ -193,6 +193,7 @@ class Cuevana3Adapter(MediaProvider):
                         overview=None,
                         provider=self.name,
                         provider_id=provider_id,
+                        available_languages=["es"],
                     )
                 )
 
