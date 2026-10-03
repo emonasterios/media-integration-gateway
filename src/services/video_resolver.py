@@ -68,6 +68,42 @@ class VideoResolver:
         url_lower = url.lower()
         return any(domain in url_lower for domain in DOODSTREAM_DOMAINS)
 
+    async def _validate_video_url(self, video_url: str, headers: dict) -> bool:
+        """Verifica que la URL devuelva realmente video (no HTML/403)."""
+        try:
+            resp = await self._client.head(
+                video_url,
+                headers=headers,
+                follow_redirects=True,
+            )
+            ct = resp.headers.get("content-type", "").lower()
+            # Aceptar tipos de video reales
+            valid_types = [
+                "video/",
+                "application/vnd.apple.mpegurl",  # HLS m3u8
+                "application/x-mpegurl",
+                "application/octet-stream",  # CDN genérico
+                "binary/octet-stream",
+            ]
+            # Rechazar HTML, texto, o respuestas de error
+            if resp.status_code >= 400:
+                logger.warning("HEAD %d para %s", resp.status_code, video_url[:80])
+                return False
+            if any(t in ct for t in ["text/html", "text/plain", "application/json"]):
+                logger.warning("Content-Type no-video (%s) para %s", ct, video_url[:80])
+                return False
+            if any(t in ct for t in valid_types):
+                return True
+            # Si no tiene Content-Type claro pero es 200, ser permisivo
+            # (algunos CDNs no envían CT en HEAD)
+            if resp.status_code in (200, 206):
+                logger.info("HEAD %d sin CT claro para %s, aceptando", resp.status_code, video_url[:80])
+                return True
+            return False
+        except httpx.HTTPError as e:
+            logger.warning("Error validando URL %s: %s", video_url[:80], e)
+            return False
+
     async def resolve_doodstream(self, embed_url: str) -> Optional[PlaybackDescriptor]:
         """
         Resuelve la URL de embed de Doodstream/Playmogo a una URL de video directo MP4.
@@ -134,6 +170,13 @@ class VideoResolver:
         video_url = f"{cdn_base}{token}?t={int(time.time())}"
 
         logger.info("Doodstream resuelto: %s → %s", embed_url, video_url[:80])
+        
+        # Validar que la URL realmente sirva video
+        valid = await self._validate_video_url(video_url, {"Referer": base_url})
+        if not valid:
+            logger.warning("URL de Doodstream no válida (caída o 403): %s", video_url[:80])
+            return None
+        
         return PlaybackDescriptor(
             protocol="mp4",
             url=video_url,
@@ -167,11 +210,14 @@ class VideoResolver:
             src = source.get("src", "")
             if src and (src.endswith(".m3u8") or src.endswith(".mp4")):
                 protocol = "hls" if ".m3u8" in src else "mp4"
-                return PlaybackDescriptor(
-                    protocol=protocol,
-                    url=src,
-                    headers={"Referer": embed_url},
-                )
+                # Validar URL
+                valid = await self._validate_video_url(src, {"Referer": embed_url})
+                if valid:
+                    return PlaybackDescriptor(
+                        protocol=protocol,
+                        url=src,
+                        headers={"Referer": embed_url},
+                    )
 
         # Patrón 2: Buscar URLs en scripts (player config)
         scripts = soup.find_all("script")
@@ -180,47 +226,55 @@ class VideoResolver:
             # Buscar m3u8
             m3u8_match = re.search(r'(https?://[^\s"\']+\.m3u8[^\s"\']*)', txt)
             if m3u8_match:
-                return PlaybackDescriptor(
-                    protocol="hls",
-                    url=m3u8_match.group(1),
-                    headers={"Referer": embed_url},
-                )
+                url = m3u8_match.group(1)
+                valid = await self._validate_video_url(url, {"Referer": embed_url})
+                if valid:
+                    return PlaybackDescriptor(
+                        protocol="hls",
+                        url=url,
+                        headers={"Referer": embed_url},
+                    )
             # Buscar mp4 directo
             mp4_match = re.search(r'(https?://[^\s"\']+\.mp4[^\s"\']*)', txt)
             if mp4_match:
-                return PlaybackDescriptor(
-                    protocol="mp4",
-                    url=mp4_match.group(1),
-                    headers={"Referer": embed_url},
-                )
+                url = mp4_match.group(1)
+                valid = await self._validate_video_url(url, {"Referer": embed_url})
+                if valid:
+                    return PlaybackDescriptor(
+                        protocol="mp4",
+                        url=url,
+                        headers={"Referer": embed_url},
+                    )
             # Buscar pattern file: 'url' o src: 'url'
             file_match = re.search(r'''(?:file|src)\s*:\s*['"]([^'"]+)['"]''', txt)
             if file_match:
                 url = file_match.group(1)
                 if url.startswith("http"):
                     protocol = "hls" if ".m3u8" in url else "mp4"
-                    return PlaybackDescriptor(
-                        protocol=protocol,
-                        url=url,
-                        headers={"Referer": embed_url},
-                    )
+                    valid = await self._validate_video_url(url, {"Referer": embed_url})
+                    if valid:
+                        return PlaybackDescriptor(
+                            protocol=protocol,
+                            url=url,
+                            headers={"Referer": embed_url},
+                        )
 
         # Patrón 3: Buscar variables de video ofuscadas
-        # Voe a veces usa variables como 'hls', 'videoSrc', etc.
         for script in scripts:
             txt = script.get_text()
-            # Buscar cualquier URL larga que parezca un CDN de video
             cdn_matches = re.findall(
                 r'(https?://[a-zA-Z0-9.-]+\.[a-z]{2,}/[a-zA-Z0-9/_-]+\.(m3u8|mp4|m3u)[^\s"\']*)',
                 txt,
             )
             for url, ext in cdn_matches:
                 protocol = "hls" if ext in ("m3u8", "m3u") else "mp4"
-                return PlaybackDescriptor(
-                    protocol=protocol,
-                    url=url,
-                    headers={"Referer": embed_url},
-                )
+                valid = await self._validate_video_url(url, {"Referer": embed_url})
+                if valid:
+                    return PlaybackDescriptor(
+                        protocol=protocol,
+                        url=url,
+                        headers={"Referer": embed_url},
+                    )
 
         logger.debug("No se encontró video directo en %s", embed_url)
         return None
@@ -254,36 +308,44 @@ class VideoResolver:
         if video_link:
             direct_url = video_link.get_text(strip=True)
             if direct_url and direct_url.startswith("http"):
-                logger.info("Streamtape resuelto (videolink): %s", direct_url[:80])
-                return PlaybackDescriptor(
-                    protocol="mp4",
-                    url=direct_url,
-                    headers={"Referer": "https://streamtape.com/"},
-                )
+                # Validar URL
+                valid = await self._validate_video_url(direct_url, {"Referer": "https://streamtape.com/"})
+                if valid:
+                    logger.info("Streamtape resuelto (videolink): %s", direct_url[:80])
+                    return PlaybackDescriptor(
+                        protocol="mp4",
+                        url=direct_url,
+                        headers={"Referer": "https://streamtape.com/"},
+                    )
 
         # Patrón 2: buscar en scripts la URL del video
         scripts = soup.find_all("script")
         for script in scripts:
             txt = script.get_text()
-            # Streamtape usa un patrón como: 'video_url' o 'src: url'
             url_match = re.search(r"['\"](https?://[^'\"]*videoplayback[^'\"]*)['\"]", txt)
             if url_match:
-                return PlaybackDescriptor(
-                    protocol="mp4",
-                    url=url_match.group(1),
-                    headers={"Referer": "https://streamtape.com/"},
-                )
+                url = url_match.group(1)
+                valid = await self._validate_video_url(url, {"Referer": "https://streamtape.com/"})
+                if valid:
+                    return PlaybackDescriptor(
+                        protocol="mp4",
+                        url=url,
+                        headers={"Referer": "https://streamtape.com/"},
+                    )
 
         # Patrón 3: buscar URLs con .mp4 en el HTML
         for script in scripts:
             txt = script.get_text()
             mp4_match = re.search(r'(https?://[^"\']+\.mp4[^"\']*)', txt)
             if mp4_match:
-                return PlaybackDescriptor(
-                    protocol="mp4",
-                    url=mp4_match.group(1),
-                    headers={"Referer": "https://streamtape.com/"},
-                )
+                url = mp4_match.group(1)
+                valid = await self._validate_video_url(url, {"Referer": "https://streamtape.com/"})
+                if valid:
+                    return PlaybackDescriptor(
+                        protocol="mp4",
+                        url=url,
+                        headers={"Referer": "https://streamtape.com/"},
+                    )
 
         logger.debug("No se encontró video directo en Streamtape %s", embed_url)
         return None
@@ -367,6 +429,12 @@ class VideoResolver:
             video_url = hls_urls["hls3"]
 
         if not video_url:
+            return None
+
+        # Validar URL antes de devolver
+        valid = await self._validate_video_url(video_url, {"Referer": "https://morencius.com/"})
+        if not valid:
+            logger.warning("URL de Morencius no válida: %s", video_url[:100])
             return None
 
         logger.info("Morencius resuelto: %s → %s", embed_url, video_url[:100])

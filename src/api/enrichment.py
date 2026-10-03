@@ -34,6 +34,11 @@ async def start_enrichment(
     """Inicia el proceso de enriquecimiento del catálogo."""
     enricher = get_enricher()
     mt = None if media_type == "all" else MediaType(media_type)
+    
+    # Normalizar provider: None o "" = todos
+    if not provider:
+        provider = None
+    
     result = await enricher.run(
         provider=provider,
         media_type=mt,
