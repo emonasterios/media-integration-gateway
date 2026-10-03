@@ -273,11 +273,14 @@ def test_player_api_get_live_categories(client):
 
 
 def test_player_api_get_live_streams(client):
-    """GET /player_api.php?action=get_live_streams responde con lista vacía."""
+    """Xtream publica una entrada live para clientes que rechazan listas vacías."""
     r = client.get("/player_api.php?username=test&password=test&action=get_live_streams")
     assert r.status_code == 200
     data = r.json()
-    assert data == []
+    assert len(data) == 1
+    assert data[0]["stream_type"] == "live"
+    assert data[0]["stream_id"] == 1
+    assert data[0]["category_id"] == "3"
 
 
 def test_player_api_get_vod_streams(client):
@@ -330,7 +333,7 @@ def test_panel_api(client):
     data = r.json()
     assert "panel_info" in data
     panel = data["panel_info"]
-    assert panel["live_streams"] == 0
+    assert panel["live_streams"] == 1
     assert panel["vod_streams"] == 2  # Dos películas
     assert panel["series_streams"] == 1  # Una serie
     assert panel["episodes"] == 0

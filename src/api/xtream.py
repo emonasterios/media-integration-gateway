@@ -132,7 +132,26 @@ async def xtream_player_api(
         return [_media_item_to_series_stream(item, idx) for idx, item in enumerate(series, 1)]
 
     if action == "get_live_streams":
-        return []
+        # iMPlayer treats an empty live-stream response as a playlist download
+        # failure, even when the account only exposes VOD and series.  Publish
+        # one harmless compatibility entry so it can finish importing the
+        # playlist and expose the real movie/series catalogs.
+        return [
+            {
+                "num": 1,
+                "name": "Peliculas y Series",
+                "stream_type": "live",
+                "stream_id": 1,
+                "stream_icon": "",
+                "epg_channel_id": None,
+                "added": "",
+                "category_id": "3",
+                "custom_sid": "",
+                "tv_archive": 0,
+                "direct_source": "",
+                "tv_archive_duration": 0,
+            }
+        ]
 
     # Búsqueda por nombre
     if action == "search_vod":
@@ -173,7 +192,7 @@ async def xtream_panel_api(
 
     return {
         "panel_info": {
-            "live_streams": 0,
+            "live_streams": 1,
             "vod_streams": len(movies),
             "series_streams": len(series),
             "episodes": 0,
