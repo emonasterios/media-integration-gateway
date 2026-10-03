@@ -425,12 +425,8 @@ class Cuevana3Adapter(MediaProvider):
         return html, resp
 
     async def resolve_playback(self, media_id: str) -> PlaybackDescriptor:
-        """Navega a la página del título y extrae URLs de servidores (Doodstream, Voe, Vidhide).
-        
-        NO asumir que existe un iframe con src en el HTML estático inicial.
-        Los servidores se cargan dinámicamente o sus identificadores residen en
-        atributos como data-mdl / scripts.
-        Integra FlareSolverr como bypass opcional para desafíos Cloudflare."""
+        """Navega a la página del título, extrae TODOS los servidores y prueba cada uno
+        hasta encontrar uno que sirva video real. Si ninguno funciona, lanza ValueError."""
         slug = media_id.removeprefix("cuevana3:")
         html = None
 
@@ -444,30 +440,58 @@ class Cuevana3Adapter(MediaProvider):
 
         soup = BeautifulSoup(html, "lxml")
 
-        # 1. Buscar servidores en etiquetas li con data-server (NUEVO: estructura real)
-        li = soup.select_one("li[data-server]")
-        if li and li.get("data-server"):
-            return await self._build_playback_descriptor(li["data-server"])
+        # Recopilar TODOS los servidores candidatos
+        candidates = []
 
-        # 2. Buscar servidores en la lista ul/li con data-mdl o data-url (PRIORIDAD ALTA)
+        # 1. Servidores en li[data-server]
+        for li in soup.select("li[data-server]"):
+            if li.get("data-server"):
+                candidates.append(li["data-server"])
+
+        # 2. Servidores en lista ul/li con data-mdl o data-url
         server_info = self._extract_server_from_list(soup)
         if server_info:
-            return await self._build_playback_descriptor(server_info["url"])
+            candidates.append(server_info["url"])
 
-        # 3. Buscar en scripts inline (data-url, onclick, etc.)
+        # 3. Servidores en scripts inline
         server_url = self._extract_server_from_scripts(soup)
         if server_url:
-            return await self._build_playback_descriptor(server_url)
+            candidates.append(server_url)
 
-        # 4. Fallback: buscar cualquier enlace a servidor conocido
+        # 4. Cualquier enlace a servidor conocido
         for link in soup.find_all("a", href=True):
             href = link["href"]
             if self._is_known_server(href):
-                server_url = urljoin(self._base, href) if not href.startswith("http") else href
-                return await self._build_playback_descriptor(server_url)
+                full = urljoin(self._base, href) if not href.startswith("http") else href
+                candidates.append(full)
 
-        logger.debug("No se encontró fuente de reproducción para %s. HTML: %s", media_id, soup.prettify()[:2000])
-        raise ValueError(f"No se encontró fuente de reproducción para {media_id}")
+        # Eliminar duplicados manteniendo orden
+        seen = set()
+        unique = []
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                unique.append(c)
+
+        if not unique:
+            raise ValueError(f"No se encontró fuente de reproducción para {media_id}")
+
+        logger.info("resolve_playback: %d candidatos para %s", len(unique), media_id)
+
+        # Probar cada candidato hasta encontrar uno válido
+        for i, server_url in enumerate(unique):
+            logger.info("Probando servidor %d/%d: %s", i+1, len(unique), server_url[:80])
+            try:
+                descriptor = await self._build_playback_descriptor(server_url)
+                if descriptor:
+                    logger.info("Servidor %d válido: %s", i+1, descriptor.url[:80])
+                    return descriptor
+                else:
+                    logger.info("Servidor %d rechazado (None)", i+1)
+            except Exception as e:
+                logger.info("Servidor %d falló: %s", i+1, e)
+
+        raise ValueError(f"Ningún servidor funcionó para {media_id} ({len(unique)} candidatos)")
 
     # ------------------------------------------------------------------
     # Helpers de extracción
