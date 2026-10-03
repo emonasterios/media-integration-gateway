@@ -354,14 +354,15 @@ class VideoResolver:
             logger.debug("No se encontraron URLs HLS en links: %s", embed_url)
             return None
 
-        # Preferir hls2 (CDN con token), luego hls4 (relativa), luego hls3
+        # Preferir hls4 (relativa en morencius.com, más estable),
+        # luego hls2 (CDN con token, a veces cae), luego hls3
         from urllib.parse import urljoin
 
         video_url = None
-        if "hls2" in hls_urls:
-            video_url = hls_urls["hls2"]
-        elif "hls4" in hls_urls:
+        if "hls4" in hls_urls:
             video_url = urljoin(embed_url, hls_urls["hls4"])
+        elif "hls2" in hls_urls:
+            video_url = hls_urls["hls2"]
         elif "hls3" in hls_urls:
             video_url = hls_urls["hls3"]
 
