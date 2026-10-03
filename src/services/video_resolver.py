@@ -61,15 +61,19 @@ class VideoResolver:
         """
         Resuelve la URL de embed de Doodstream/Playmogo a una URL de video directo MP4.
         
-        Args:
-            embed_url: URL de la página de embed (ej: https://doodstream.com/e/abc123)
-            
-        Returns:
-            PlaybackDescriptor con protocol="mp4" y la URL directa, o None si falla.
+        Flujo:
+        1. GET embed → extraer pass_md5 y token
+        2. GET /pass_md5/... → obtiene URL base del CDN
+        3. Construir: {cdn_base}{token}?t={timestamp}
         """
-        # 1. Obtener la página de embed
+        headers = {
+            "User-Agent": self._client.headers.get("User-Agent", ""),
+            "Referer": "https://doodstream.com/",
+        }
+
+        # 1. Obtener la página de embed (seguir redirects a playmogo, etc.)
         try:
-            resp = await self._client.get(embed_url)
+            resp = await self._client.get(embed_url, headers=headers)
             resp.raise_for_status()
         except httpx.HTTPError as e:
             logger.warning("Error obteniendo página de embed %s: %s", embed_url, e)
@@ -78,27 +82,33 @@ class VideoResolver:
         page_url = str(resp.url)
         html = resp.text
 
-        # 2. Extraer token
+        # 2. Extraer pass_md5 (formato: /pass_md5/265711424-181-.../token)
+        pass_match = re.search(r"(/pass_md5/[^\"']+)", html)
+        if not pass_match:
+            logger.debug("No se encontró pass_md5 en la página: %s", embed_url)
+            return None
+        pass_path = pass_match.group(1)
+
+        # 3. Extraer token
         token_match = re.search(r"token=([a-zA-Z0-9]+)", html)
         if not token_match:
             logger.debug("No se encontró token en la página: %s", embed_url)
             return None
         token = token_match.group(1)
 
-        # 3. Extraer pass_path
-        pass_match = re.search(r"pass_md5/([^'\"]+)", html)
-        if not pass_match:
-            logger.debug("No se encontró pass_path en la página: %s", embed_url)
-            return None
-        pass_path = pass_match.group(1)
+        # 4. Determinar dominio base (puede ser doodstream.com o playmogo.com)
+        from urllib.parse import urlparse
+        parsed = urlparse(page_url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
 
-        # 4. Obtener URL base del CDN
-        base_url = page_url.rsplit("/", 1)[0]
-        pass_url = f"{base_url}/pass_md5/{pass_path}"
-
-        # 5. Hacer GET a pass_url con Referer
+        # 5. Llamar al pass_md5 endpoint
+        pass_url = f"{base_url}{pass_path}"
+        pass_headers = {
+            "User-Agent": headers["User-Agent"],
+            "Referer": page_url,
+        }
         try:
-            pass_resp = await self._client.get(pass_url, headers={"Referer": page_url})
+            pass_resp = await self._client.get(pass_url, headers=pass_headers)
             pass_resp.raise_for_status()
             cdn_base = pass_resp.text.strip()
         except httpx.HTTPError as e:
@@ -109,16 +119,10 @@ class VideoResolver:
             logger.debug("CDN base no es una URL válida: %s", cdn_base)
             return None
 
-        # 6. Generar sufijo aleatorio y expiry
-        random_suffix = "".join(
-            random.choices(string.ascii_letters + string.digits, k=10)
-        )
-        expiry = int(time.time() * 1000)
+        # 6. Construir URL final del video
+        video_url = f"{cdn_base}{token}?t={int(time.time())}"
 
-        # 7. Construir URL final del video
-        video_url = f"{cdn_base}{random_suffix}?token={token}&expiry={expiry}"
-
-        # 8. Retornar descriptor de reproducción
+        logger.info("Doodstream resuelto: %s → %s", embed_url, video_url[:80])
         return PlaybackDescriptor(
             protocol="mp4",
             url=video_url,
