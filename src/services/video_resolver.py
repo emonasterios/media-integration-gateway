@@ -69,18 +69,20 @@ class VideoResolver:
         return any(domain in url_lower for domain in DOODSTREAM_DOMAINS)
 
     async def _validate_video_url(self, video_url: str, headers: dict) -> bool:
-        """Verifica que la URL devuelva realmente video (no HTML/403)."""
+        """Verifica que la URL devuelva realmente video (no HTML/403).
+        Sigue TODA la cadena de redirects y verifica el destino final."""
         try:
-            # CDNs de streaming suelen tener certs expirados — crear cliente sin verificación
             import ssl
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
             async with httpx.AsyncClient(verify=ssl_context) as verify_client:
+                # HEAD con redirects para verificar el destino final
                 resp = await verify_client.head(
                     video_url,
                     headers=headers,
                     follow_redirects=True,
+                    timeout=15.0,
                 )
             ct = resp.headers.get("content-type", "").lower()
             # Aceptar tipos de video reales
@@ -93,15 +95,18 @@ class VideoResolver:
             ]
             # Rechazar HTML, texto, o respuestas de error
             if resp.status_code >= 400:
-                logger.warning("HEAD %d para %s", resp.status_code, video_url[:80])
+                logger.warning("HEAD %d para %s (final: %s)", resp.status_code, video_url[:80], str(resp.url)[:80])
                 return False
             if any(t in ct for t in ["text/html", "text/plain", "application/json"]):
                 logger.warning("Content-Type no-video (%s) para %s", ct, video_url[:80])
                 return False
             if any(t in ct for t in valid_types):
                 return True
+            # Si sigue siendo 302 después de follow_redirects=True, el destino final no respondió
+            if resp.status_code == 302:
+                logger.warning("HEAD 302 sin resolver para %s → %s", video_url[:80], str(resp.url)[:80])
+                return False
             # Si no tiene Content-Type claro pero es 200, ser permisivo
-            # (algunos CDNs no envían CT en HEAD)
             if resp.status_code in (200, 206):
                 logger.info("HEAD %d sin CT claro para %s, aceptando", resp.status_code, video_url[:80])
                 return True
