@@ -343,7 +343,7 @@ class Cuevana3Adapter(MediaProvider):
     # ------------------------------------------------------------------
     # Resolución de reproducción
     # ------------------------------------------------------------------
-    async def _build_playback_descriptor(self, server_url: str) -> PlaybackDescriptor:
+    async def _build_playback_descriptor(self, server_url: str) -> Optional[PlaybackDescriptor]:
         if VideoResolver.is_doodstream(server_url):
             try:
                 direct = await self._video_resolver.resolve_doodstream(server_url)
@@ -358,11 +358,23 @@ class Cuevana3Adapter(MediaProvider):
                     return direct
             except Exception as e:
                 logger.warning("Fallo resolviendo Voe %s: %s", server_url, e)
-        return PlaybackDescriptor(
-            protocol="embed",
-            url=server_url,
-            headers={"Referer": self._base},
-        )
+        elif VideoResolver.is_streamtape(server_url):
+            try:
+                direct = await self._video_resolver.resolve_streamtape(server_url)
+                if direct:
+                    return direct
+            except Exception as e:
+                logger.warning("Fallo resolviendo Streamtape %s: %s", server_url, e)
+        elif VideoResolver.is_morencius(server_url):
+            try:
+                direct = await self._video_resolver.resolve_morencius(server_url)
+                if direct:
+                    return direct
+            except Exception as e:
+                logger.warning("Fallo resolviendo Morencius %s: %s", server_url, e)
+        # No devolver embed — si ningún resolver funciona, retornar None
+        logger.warning("Ningún resolver pudo obtener video directo de %s", server_url[:80])
+        return None
 
     @staticmethod
     def _is_cloudflare_challenge(resp: httpx.Response | None, html: str | None) -> bool:

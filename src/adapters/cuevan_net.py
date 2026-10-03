@@ -279,7 +279,9 @@ class CuevanNetAdapter(MediaProvider):
         # 3. Buscar iframes directos
         iframe = soup.find("iframe", src=True)
         if iframe:
-            return await self._build_playback_descriptor(iframe["src"])
+            desc = await self._build_playback_descriptor(iframe["src"])
+            if desc:
+                return desc
 
         logger.debug("No se encontró fuente de reproducción para %s", media_id)
         raise ValueError(f"No se encontró fuente de reproducción para {media_id}")
@@ -298,14 +300,16 @@ class CuevanNetAdapter(MediaProvider):
                 if iframe:
                     server_url = iframe["src"]
                     logger.info("Embed resuelto a servidor externo: %s", server_url[:80])
-                    return await self._build_playback_descriptor(server_url)
+                    desc = await self._build_playback_descriptor(server_url)
+                    if desc:
+                        return desc
         except httpx.HTTPError as e:
             logger.warning("Error resolviendo embed %s: %s", embed_url[:80], e)
 
         # Si no se puede resolver el embed, devolver el embed mismo
         return PlaybackDescriptor(protocol="embed", url=embed_url, headers={"Referer": self._base})
 
-    async def _build_playback_descriptor(self, server_url: str) -> PlaybackDescriptor:
+    async def _build_playback_descriptor(self, server_url: str) -> Optional[PlaybackDescriptor]:
         """Intenta resolver servidores conocidos a URL directa."""
         if VideoResolver.is_morencius(server_url):
             try:
@@ -339,7 +343,9 @@ class CuevanNetAdapter(MediaProvider):
             except Exception as e:
                 logger.warning("Fallo resolviendo Voe %s: %s", server_url, e)
 
-        return PlaybackDescriptor(protocol="embed", url=server_url, headers={"Referer": self._base})
+        # No devolver embed — si ningún resolver funciona, retornar None
+        logger.warning("Ningún resolver pudo obtener video directo de %s", server_url[:80])
+        return None
 
     # ------------------------------------------------------------------
     # Helpers de parsing
