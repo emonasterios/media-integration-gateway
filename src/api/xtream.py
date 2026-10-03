@@ -162,7 +162,8 @@ async def xtream_panel_api(
 
 # ── Streaming endpoints (lo que la TV pide al reproducir) ──────────
 
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -190,19 +191,16 @@ async def stream_movie(
     password: str,
     stream_id: int,
     ext: str = "mp4",
+    request: Request | None = None,
     catalog_service: CatalogService = Depends(_get_catalog_service),
 ):
-    """Reproduce una película VOD. Resuelve el video real y redirige o hace proxy."""
+    """Reproduce una película VOD. Hace proxy del video real a la TV."""
     catalog = await catalog_service.get_catalog("cuevana3")
     media = _stream_id_to_media(stream_id, "movie", catalog)
     if not media:
         return {"error": "stream not found", "stream_id": stream_id}
 
     result = await catalog_service.resolve_playback(media.provider, media.provider_id)
-
-    # Si es video directo (hls/mp4), redirigir
-    if result.protocol in ("hls", "mp4"):
-        return RedirectResponse(url=result.url, status_code=302)
 
     # Si es embed HTML, intentar resolver el video real
     if result.protocol == "embed":
@@ -212,20 +210,35 @@ async def stream_movie(
             if VideoResolver.is_voe(result.url):
                 direct = await resolver.resolve_voe(result.url)
                 if direct and direct.protocol in ("hls", "mp4"):
-                    await resolver.close()
-                    return RedirectResponse(url=direct.url, status_code=302)
+                    result = direct
             elif VideoResolver.is_doodstream(result.url):
                 direct = await resolver.resolve_doodstream(result.url)
                 if direct and direct.protocol in ("hls", "mp4"):
-                    await resolver.close()
-                    return RedirectResponse(url=direct.url, status_code=302)
+                    result = direct
         except Exception as e:
             logger.warning("Fallo resolviendo embed %s: %s", result.url, e)
         finally:
             await resolver.close()
 
-    # Fallback: redirigir al embed (la TV puede que no lo reproduzca)
+    # Si es video directo (hls/mp4), hacer proxy
+    if result.protocol in ("hls", "mp4"):
+        headers = {"Referer": result.headers.get("Referer", result.url)} if result.headers else {}
+        return StreamingResponse(
+            _proxy_stream(result.url, headers),
+            media_type="video/mp4" if result.protocol == "mp4" else "application/vnd.apple.mpegurl",
+        )
+
+    # Fallback: redirigir al embed
     return RedirectResponse(url=result.url, status_code=302)
+
+
+async def _proxy_stream(url: str, headers: dict):
+    """Generador que hace proxy del stream de video a la TV."""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
+        async with client.stream("GET", url, headers=headers) as resp:
+            resp.raise_for_status()
+            async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
+                yield chunk
 
 
 @router.get("/series/{username}/{password}/{stream_id}/{episode}.{ext}")
