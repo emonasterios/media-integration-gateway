@@ -122,15 +122,31 @@ class CatalogService:
         await self._cache.save_media(item_data, sources_data)
 
     async def search(self, query: str, provider: str | None = None) -> list[SearchResult]:
-        """Buscar en uno o todos los proveedores."""
+        """Buscar en el catálogo cacheado (filtrado local por título)."""
+        query_lower = query.lower().strip()
+        if not query_lower:
+            return []
+        
         targets = [self._providers[provider]] if provider else list(self._providers.values())
         results: list[SearchResult] = []
+        
         for p in targets:
             try:
-                results.append(await p.search(query))
+                # Obtener catálogo completo del proveedor
+                catalog = await self.get_catalog(p.name)
+                # Filtrar localmente por título
+                matched = [
+                    item for item in catalog
+                    if query_lower in item.title.lower()
+                ]
+                if matched:
+                    results.append(SearchResult(items=matched, total=len(matched), query=query))
             except Exception:
-                # Proveedor caído: continuar con los demás
-                pass
+                # Proveedor caído: intentar search del adapter como fallback
+                try:
+                    results.append(await p.search(query))
+                except Exception:
+                    pass
         return results
 
     async def get_details(self, provider: str, media_id: str) -> MediaItem:
