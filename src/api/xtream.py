@@ -190,8 +190,8 @@ async def stream_movie(
     username: str,
     password: str,
     stream_id: int,
+    request: Request,
     ext: str = "mp4",
-    request: Optional[Request] = None,
     catalog_service: CatalogService = Depends(_get_catalog_service),
 ):
     """Reproduce una película VOD. Hace proxy del video real con soporte de rangos."""
@@ -224,7 +224,7 @@ async def stream_movie(
     if result.protocol in ("hls", "mp4"):
         headers = {"Referer": result.headers.get("Referer", result.url)} if result.headers else {}
         # Forward Range header si la TV lo envía
-        if request and request.headers.get("range"):
+        if request.headers.get("range"):
             headers["Range"] = request.headers["range"]
         return StreamingResponse(
             _proxy_stream(result.url, headers),
