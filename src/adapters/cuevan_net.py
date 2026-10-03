@@ -79,7 +79,14 @@ class CuevanNetAdapter(MediaProvider):
     # ------------------------------------------------------------------
     async def get_catalog(self, category: Optional[str] = None) -> list[MediaItem]:
         """Lista películas o series recientes con paginación completa."""
-        path = "/peliculas" if not category else f"/genero/{category}"
+        if category == "movies":
+            path = "/peliculas"
+        elif category == "series":
+            path = "/series"
+        elif category:
+            path = f"/genero/{category}"
+        else:
+            path = "/peliculas"  # default
         all_items: list[MediaItem] = []
         page = 1
         max_pages = 10  # límite inicial razonable (se puede aumentar después)
