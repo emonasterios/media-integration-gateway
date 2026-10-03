@@ -8,6 +8,7 @@ from typing import AsyncIterator, Optional
 from fastapi import FastAPI
 
 from src.adapters.cuevana3 import Cuevana3Adapter
+from src.adapters.cuevan_net import CuevanNetAdapter
 from src.api.routes import router
 from src.api.m3u import router as m3u_router
 from src.api.xtream import router as xtream_router
@@ -51,13 +52,15 @@ def create_app(override_catalog: Optional[CatalogService] = None) -> FastAPI:
             await init_db()
             db = AsyncSessionLocal()
             adapter = Cuevana3Adapter()
-            catalog = CatalogService(providers=[adapter], cache=CatalogCache(db))
+            cuevan_net = CuevanNetAdapter()
+            catalog = CatalogService(providers=[adapter, cuevan_net], cache=CatalogCache(db))
             from src.api.routes import _get_catalog
             from src.api.xtream import _get_catalog_service as _xtream_get_catalog
             app.dependency_overrides[_get_catalog] = lambda: catalog
             app.dependency_overrides[_xtream_get_catalog] = lambda: catalog
             yield
             await adapter.close()
+            await cuevan_net.close()
             await db.close()
 
     app = FastAPI(

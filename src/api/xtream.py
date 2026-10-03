@@ -118,12 +118,14 @@ async def xtream_player_api(
 
     if action == "get_vod_streams":
         catalog = await catalog_service.get_catalog("cuevana3")
-        movies = [item for item in catalog if item.media_type == MediaType.MOVIE]
+        catalog2 = await catalog_service.get_catalog("cuevan_net")
+        movies = [item for item in catalog + catalog2 if item.media_type == MediaType.MOVIE]
         return [_media_item_to_vod_stream(item, idx) for idx, item in enumerate(movies, 1)]
 
     if action == "get_series":
         catalog = await catalog_service.get_catalog("cuevana3")
-        series = [item for item in catalog if item.media_type == MediaType.SERIES]
+        catalog2 = await catalog_service.get_catalog("cuevan_net")
+        series = [item for item in catalog + catalog2 if item.media_type == MediaType.SERIES]
         return [_media_item_to_series_stream(item, idx) for idx, item in enumerate(series, 1)]
 
     if action == "get_live_streams":
@@ -145,8 +147,9 @@ async def xtream_panel_api(
         return {"user_info": {"auth": 0}, "server_info": {}}
 
     catalog = await catalog_service.get_catalog("cuevana3")
-    movies = [item for item in catalog if item.media_type == MediaType.MOVIE]
-    series = [item for item in catalog if item.media_type == MediaType.SERIES]
+    catalog2 = await catalog_service.get_catalog("cuevan_net")
+    movies = [item for item in catalog + catalog2 if item.media_type == MediaType.MOVIE]
+    series = [item for item in catalog + catalog2 if item.media_type == MediaType.SERIES]
 
     return {
         "panel_info": {
@@ -196,7 +199,8 @@ async def stream_movie(
 ):
     """Reproduce una película VOD. Hace proxy del video real con soporte de rangos."""
     catalog = await catalog_service.get_catalog("cuevana3")
-    media = _stream_id_to_media(stream_id, "movie", catalog)
+    catalog2 = await catalog_service.get_catalog("cuevan_net")
+    media = _stream_id_to_media(stream_id, "movie", catalog + catalog2)
     if not media:
         return {"error": "stream not found", "stream_id": stream_id}
 
@@ -250,7 +254,8 @@ async def stream_series(
 ):
     """Reproduce un episodio de serie. Redirige al URL de playback real."""
     catalog = await catalog_service.get_catalog("cuevana3")
-    media = _stream_id_to_media(stream_id, "series", catalog)
+    catalog2 = await catalog_service.get_catalog("cuevan_net")
+    media = _stream_id_to_media(stream_id, "series", catalog + catalog2)
     if not media:
         return {"error": "stream not found", "stream_id": stream_id}
 

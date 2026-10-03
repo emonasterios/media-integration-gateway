@@ -32,6 +32,12 @@ VOE_DOMAINS = (
     "voeunblocker.com",
 )
 
+STREAMTAPE_DOMAINS = (
+    "streamtape.com",
+    "streamtape.to",
+    "streamtape.site",
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -212,6 +218,69 @@ class VideoResolver:
                 )
 
         logger.debug("No se encontró video directo en %s", embed_url)
+        return None
+
+    @staticmethod
+    def is_streamtape(url: str) -> bool:
+        """Verifica si la URL pertenece a un dominio Streamtape."""
+        url_lower = url.lower()
+        return any(domain in url_lower for domain in STREAMTAPE_DOMAINS)
+
+    async def resolve_streamtape(self, embed_url: str) -> Optional[PlaybackDescriptor]:
+        """
+        Resuelve la URL de embed de Streamtape a una URL de video directo.
+        Streamtape usa un sistema de 'videoplayback' con tokens.
+        """
+        try:
+            resp = await self._client.get(embed_url)
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            logger.warning("Error obteniendo página de Streamtape %s: %s", embed_url, e)
+            return None
+
+        html = resp.text
+
+        # Streamtape tiene un div con id='videolink' que contiene la URL directa
+        # o un script con la URL del video
+        soup = BeautifulSoup(html, "lxml")
+
+        # Patrón 1: buscar div#videolink
+        video_link = soup.find("div", id="videolink")
+        if video_link:
+            direct_url = video_link.get_text(strip=True)
+            if direct_url and direct_url.startswith("http"):
+                logger.info("Streamtape resuelto (videolink): %s", direct_url[:80])
+                return PlaybackDescriptor(
+                    protocol="mp4",
+                    url=direct_url,
+                    headers={"Referer": "https://streamtape.com/"},
+                )
+
+        # Patrón 2: buscar en scripts la URL del video
+        scripts = soup.find_all("script")
+        for script in scripts:
+            txt = script.get_text()
+            # Streamtape usa un patrón como: 'video_url' o 'src: url'
+            url_match = re.search(r"['\"](https?://[^'\"]*videoplayback[^'\"]*)['\"]", txt)
+            if url_match:
+                return PlaybackDescriptor(
+                    protocol="mp4",
+                    url=url_match.group(1),
+                    headers={"Referer": "https://streamtape.com/"},
+                )
+
+        # Patrón 3: buscar URLs con .mp4 en el HTML
+        for script in scripts:
+            txt = script.get_text()
+            mp4_match = re.search(r'(https?://[^"\']+\.mp4[^"\']*)', txt)
+            if mp4_match:
+                return PlaybackDescriptor(
+                    protocol="mp4",
+                    url=mp4_match.group(1),
+                    headers={"Referer": "https://streamtape.com/"},
+                )
+
+        logger.debug("No se encontró video directo en Streamtape %s", embed_url)
         return None
 
     async def close(self) -> None:
