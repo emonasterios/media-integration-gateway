@@ -308,6 +308,25 @@ def test_player_api_get_vod_streams(client):
     assert stream2["stream_id"] == 1002
 
 
+def test_player_api_get_vod_info(client):
+    """iMPlayer recibe el detalle Xtream necesario antes de reproducir."""
+    r = client.get(
+        "/player_api.php?username=test&password=test&action=get_vod_info&vod_id=1001"
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["info"]["name"] == "Película Test 1"
+    assert data["movie_data"]["stream_id"] == 1001
+    assert data["movie_data"]["container_extension"] == "mp4"
+
+
+def test_movie_route_accepts_extension(client):
+    """La ruta .mp4 no debe caer en la variante extensionless y responder 422."""
+    r = client.get("/movie/test/test/1001.mp4", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "https://example.com/video.mp4"
+
+
 def test_player_api_get_series(client):
     """GET /player_api.php?action=get_series responde con lista formateada de series."""
     r = client.get("/player_api.php?username=test&password=test&action=get_series")

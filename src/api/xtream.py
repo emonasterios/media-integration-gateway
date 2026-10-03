@@ -125,6 +125,36 @@ async def xtream_player_api(
         movies = [item for item in catalog + catalog2 if item.media_type == MediaType.MOVIE]
         return [_media_item_to_vod_stream(item, idx) for idx, item in enumerate(movies, 1)]
 
+    if action == "get_vod_info":
+        vod_id = request.query_params.get("vod_id", "")
+        try:
+            stream_id = int(vod_id)
+        except ValueError:
+            return {}
+
+        catalog = await catalog_service.get_catalog("cuevana3")
+        catalog2 = await catalog_service.get_catalog("cuevan_net")
+        item = _stream_id_to_media(stream_id, "movie", catalog + catalog2)
+        if item is None:
+            return {}
+
+        return {
+            "info": {
+                "name": item.title,
+                "o_name": item.title,
+                "movie_image": item.poster_url or "",
+                "releasedate": str(item.year) if item.year else "",
+                "plot": item.overview or "",
+                "cast": ", ".join(item.cast or []),
+                "director": item.director or "",
+                "duration": item.duration or "",
+                "rating": str(item.rating or 0),
+                "country": item.country or "",
+                "genre": ", ".join(item.genres),
+            },
+            "movie_data": _media_item_to_vod_stream(item, stream_id - 1000),
+        }
+
     if action == "get_series":
         catalog = await catalog_service.get_catalog("cuevana3")
         catalog2 = await catalog_service.get_catalog("cuevan_net")
@@ -226,8 +256,8 @@ def _stream_id_to_media(index: int, media_type: str, catalog: list[MediaItem]) -
     return None
 
 
-@router.get("/movie/{username}/{password}/{stream_id}.{ext}")
 @router.get("/movie/{username}/{password}/{stream_id}")
+@router.get("/movie/{username}/{password}/{stream_id}.{ext}")
 async def stream_movie(
     username: str,
     password: str,
