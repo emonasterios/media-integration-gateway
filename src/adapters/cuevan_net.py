@@ -292,6 +292,14 @@ class CuevanNetAdapter(MediaProvider):
 
     async def _build_playback_descriptor(self, server_url: str) -> PlaybackDescriptor:
         """Intenta resolver servidores conocidos a URL directa."""
+        if VideoResolver.is_morencius(server_url):
+            try:
+                direct = await self._video_resolver.resolve_morencius(server_url)
+                if direct:
+                    return direct
+            except Exception as e:
+                logger.warning("Fallo resolviendo Morencius %s: %s", server_url, e)
+
         if VideoResolver.is_streamtape(server_url):
             try:
                 direct = await self._video_resolver.resolve_streamtape(server_url)

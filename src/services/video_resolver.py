@@ -38,6 +38,11 @@ STREAMTAPE_DOMAINS = (
     "streamtape.site",
 )
 
+MORENCIUS_DOMAINS = (
+    "morencius.com",
+    "pixibay.cc",
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -282,6 +287,126 @@ class VideoResolver:
 
         logger.debug("No se encontró video directo en Streamtape %s", embed_url)
         return None
+
+    @staticmethod
+    def is_morencius(url: str) -> bool:
+        """Verifica si la URL pertenece a un dominio Morencius."""
+        url_lower = url.lower()
+        return any(domain in url_lower for domain in MORENCIUS_DOMAINS)
+
+    async def resolve_morencius(self, embed_url: str) -> Optional[PlaybackDescriptor]:
+        """
+        Resuelve la URL de embed de Morencius a una URL de video directo (HLS m3u8).
+
+        Morencius usa un script ofuscado con Dean Edwards Packer (eval function(p,a,c,k,e,d)).
+        El objeto `links` contiene las URLs de video:
+          - hls2: CDN directo (dramiyos-cdn.com) con token
+          - hls3: CDN alternativo (realestateinvests.cfd)
+          - hls4: URL relativa en morencius.com/stream/.../master.m3u8
+
+        Estrategia:
+        1. FlareSolverr para bypass anti-bot
+        2. Extraer el bloque eval(...)
+        3. Deobfuscar el Packer (base36, keyword dictionary)
+        4. Extraer objeto `links` → preferir hls2 (CDN con token), fallback hls4
+        """
+        from src.services.flaresolverr import FlareSolverrClient
+
+        flaresolverr = FlareSolverrClient()
+        solution = flaresolverr.get_solution(embed_url, max_timeout=60000)
+        if not solution or not solution.get("response"):
+            logger.warning("FlareSolverr no pudo resolver %s", embed_url)
+            return None
+
+        html = solution["response"]
+
+        # Extraer el bloque eval(function(p,a,c,k,e,d)
+        eval_match = re.search(
+            r"eval\(function\(p,a,c,k,e,d\)\{.*?return p\}\s*\(\s*'(.+?)',\s*(\d+),\s*(\d+),\s*'(.+?)'\.split\('\|'\)\s*\)\)",
+            html, re.DOTALL,
+        )
+        if not eval_match:
+            logger.debug("No se encontró eval packer en %s", embed_url)
+            return None
+
+        p_str = eval_match.group(1)
+        base = int(eval_match.group(2))
+        count = int(eval_match.group(3))
+        k_str = eval_match.group(4)
+        keywords = k_str.split("|")
+
+        # Deobfuscar: reemplazar números en base-N por keywords
+        decoded = self._unpack_packer(p_str, base, count, keywords)
+
+        # Extraer objeto links: {"hls2": "...", "hls3": "...", "hls4": "..."}
+        links_match = re.search(r'links=\{([^}]+)\}', decoded)
+        if not links_match:
+            logger.debug("No se encontró objeto links en %s", embed_url)
+            return None
+
+        links_str = links_match.group(1)
+        # Parsear manualmente las URLs del objeto
+        hls_urls = {}
+        for m in re.finditer(r'"(hls\d+)":"([^"]+)"', links_str):
+            hls_urls[m.group(1)] = m.group(2)
+
+        if not hls_urls:
+            logger.debug("No se encontraron URLs HLS en links: %s", embed_url)
+            return None
+
+        # Preferir hls2 (CDN con token), luego hls4 (relativa), luego hls3
+        from urllib.parse import urljoin
+
+        video_url = None
+        if "hls2" in hls_urls:
+            video_url = hls_urls["hls2"]
+        elif "hls4" in hls_urls:
+            video_url = urljoin(embed_url, hls_urls["hls4"])
+        elif "hls3" in hls_urls:
+            video_url = hls_urls["hls3"]
+
+        if not video_url:
+            return None
+
+        logger.info("Morencius resuelto: %s → %s", embed_url, video_url[:100])
+        return PlaybackDescriptor(
+            protocol="hls",
+            url=video_url,
+            headers={"Referer": "https://morencius.com/"},
+        )
+
+    @staticmethod
+    def _unpack_packer(p_str: str, base: int, count: int, keywords: list) -> str:
+        """
+        Deobfusca un script empaquetado con Dean Edwards Packer.
+
+        Args:
+            p_str: El string codificado (p)
+            base: La base numérica (a)
+            count: Número de keywords (c)
+            keywords: Lista de palabras clave (k)
+
+        Returns:
+            El script deobfuscado
+        """
+        def to_base(n: int, b: int) -> str:
+            if n == 0:
+                return "0"
+            digits = []
+            alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+            while n > 0:
+                digits.append(alphabet[n % b])
+                n //= b
+            return "".join(reversed(digits))
+
+        decoded = p_str
+        # Reemplazar de mayor a menor índice (como el algoritmo original)
+        for i in range(count - 1, -1, -1):
+            if i < len(keywords) and keywords[i]:
+                base_repr = to_base(i, base)
+                decoded = re.sub(r"\b" + re.escape(base_repr) + r"\b", keywords[i], decoded)
+
+        return decoded
 
     async def close(self) -> None:
         """Cierra el cliente HTTP asíncrono."""
