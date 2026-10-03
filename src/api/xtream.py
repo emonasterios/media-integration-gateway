@@ -191,9 +191,10 @@ async def stream_movie(
     password: str,
     stream_id: int,
     ext: str = "mp4",
+    request: Optional[Request] = None,
     catalog_service: CatalogService = Depends(_get_catalog_service),
 ):
-    """Reproduce una película VOD. Hace proxy del video real a la TV."""
+    """Reproduce una película VOD. Hace proxy del video real con soporte de rangos."""
     catalog = await catalog_service.get_catalog("cuevana3")
     media = _stream_id_to_media(stream_id, "movie", catalog)
     if not media:
@@ -219,12 +220,17 @@ async def stream_movie(
         finally:
             await resolver.close()
 
-    # Si es video directo (hls/mp4), hacer proxy
+    # Si es video directo (hls/mp4), hacer proxy con soporte de rangos
     if result.protocol in ("hls", "mp4"):
         headers = {"Referer": result.headers.get("Referer", result.url)} if result.headers else {}
+        # Forward Range header si la TV lo envía
+        if request and request.headers.get("range"):
+            headers["Range"] = request.headers["range"]
         return StreamingResponse(
             _proxy_stream(result.url, headers),
             media_type="video/mp4" if result.protocol == "mp4" else "application/vnd.apple.mpegurl",
+            status_code=206 if headers.get("Range") else 200,
+            headers={"Accept-Ranges": "bytes"} if result.protocol == "mp4" else {},
         )
 
     # Fallback: redirigir al embed
@@ -232,7 +238,7 @@ async def stream_movie(
 
 
 async def _proxy_stream(url: str, headers: dict):
-    """Generador que hace proxy del stream de video a la TV."""
+    """Generador que hace proxy del stream de video con soporte de rangos."""
     async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
         async with client.stream("GET", url, headers=headers) as resp:
             resp.raise_for_status()
