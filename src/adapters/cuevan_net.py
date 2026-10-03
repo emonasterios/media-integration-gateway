@@ -82,7 +82,7 @@ class CuevanNetAdapter(MediaProvider):
         path = "/peliculas" if not category else f"/genero/{category}"
         all_items: list[MediaItem] = []
         page = 1
-        max_pages = 50  # límite razonable
+        max_pages = 10  # límite inicial razonable (se puede aumentar después)
 
         while page <= max_pages:
             params = {"page": page} if page > 1 else {}
