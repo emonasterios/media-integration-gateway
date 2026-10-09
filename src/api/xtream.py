@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, HTTPException
 
 from src.models.catalog import MediaItem, MediaType
 from src.services.catalog import CatalogService
@@ -286,22 +286,30 @@ async def stream_movie(
                 direct = await resolver.resolve_voe(result.url)
                 if direct and direct.protocol in ("hls", "mp4"):
                     result = direct
+                    logger.info("Redirecting to direct %s URL: %s", result.protocol, result.url[:80])
+                    return RedirectResponse(url=result.url, status_code=302)
             elif VideoResolver.is_doodstream(result.url):
                 direct = await resolver.resolve_doodstream(result.url)
                 if direct and direct.protocol in ("hls", "mp4"):
                     result = direct
+                    logger.info("Redirecting to direct %s URL: %s", result.protocol, result.url[:80])
+                    return RedirectResponse(url=result.url, status_code=302)
         except Exception as e:
             logger.warning("Fallo resolviendo embed %s: %s", result.url, e)
         finally:
             await resolver.close()
+
+        # Si llegamos aquí, el resolver falló - NO hacer fallback al embed
+        logger.error("No se pudo resolver video real para embed: %s", result.url)
+        raise HTTPException(status_code=500, detail="No se pudo resolver fuente de video")
 
     # Si es video directo (hls/mp4), redirigir al CDN
     if result.protocol in ("hls", "mp4"):
         logger.info("Redirecting to direct %s URL: %s", result.protocol, result.url[:80])
         return RedirectResponse(url=result.url, status_code=302)
 
-    # Fallback: redirigir al embed
-    return RedirectResponse(url=result.url, status_code=302)
+    # Si no es directo ni se pudo resolver
+    raise HTTPException(status_code=500, detail="Fuente de video no disponible")
 
 
 async def _proxy_stream(url: str, headers: dict):

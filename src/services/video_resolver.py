@@ -14,6 +14,8 @@ from bs4 import BeautifulSoup
 
 from src.models.catalog import PlaybackDescriptor
 
+from urllib.parse import urlparse
+
 DOODSTREAM_DOMAINS = (
     "doodstream.com",
     "dood.la",
@@ -41,6 +43,12 @@ STREAMTAPE_DOMAINS = (
 MORENCIUS_DOMAINS = (
     "morencius.com",
     "pixibay.cc",
+)
+
+PLACEHOLDER_DOMAINS = (
+    "test-videos.co.uk",
+    "sample-videos.com",
+    "file-examples.com",
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +92,12 @@ class VideoResolver:
                     follow_redirects=True,
                     timeout=15.0,
                 )
+            final_url = resp.url
+            # Rechazar dominios de placeholders conocidos
+            final_host = urlparse(str(final_url)).hostname or ""
+            if any(domain in final_host for domain in PLACEHOLDER_DOMAINS):
+                logger.warning("URL rechazada: placeholder detectado (%s)", str(final_url)[:80])
+                return False
             ct = resp.headers.get("content-type", "").lower()
             # Aceptar tipos de video reales
             valid_types = [
