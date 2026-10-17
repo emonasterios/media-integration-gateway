@@ -289,7 +289,7 @@ def test_player_api_get_vod_streams(client):
     assert r.status_code == 200
     data = r.json()
     assert isinstance(data, list)
-    assert len(data) == 2  # Dos películas del FakeProvider
+    assert len(data) == 3  # Dos cuevana3 + 1 cuevan_net del FakeProvider
 
     # Verificar estructura de la primera película
     stream1 = data[0]
@@ -353,7 +353,7 @@ def test_panel_api(client):
     assert "panel_info" in data
     panel = data["panel_info"]
     assert panel["live_streams"] == 1
-    assert panel["vod_streams"] == 2  # Dos películas
+    assert panel["vod_streams"] == 3  # Dos cuevana3 + 1 cuevan_net
     assert panel["series_streams"] == 1  # Una serie
     assert panel["episodes"] == 0
     assert panel["active_connections"] == 0
