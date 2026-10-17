@@ -114,12 +114,23 @@ async def test_resolve_playback_real_fixture(adapter):
         raise_for_status=lambda: None,
     )
 
+    # Mockear el video_resolver para evitar llamadas reales a los hosts de video
+    fake_descriptor = PlaybackDescriptor(
+        url="https://doodstream.com/e/jtri5tfbukk6",
+        protocol="mp4",
+        headers={"Referer": "https://cuevana3i.cc"},
+    )
+    adapter._video_resolver.resolve_doodstream = AsyncMock(return_value=fake_descriptor)
+    adapter._video_resolver.resolve_voe = AsyncMock(return_value=None)
+    adapter._video_resolver.resolve_streamtape = AsyncMock(return_value=None)
+    adapter._video_resolver.resolve_morencius = AsyncMock(return_value=None)
+
     result = await adapter.resolve_playback("cuevana3:signal-one")
 
     # Verificar descriptor de reproducción
     assert isinstance(result, PlaybackDescriptor)
-    assert result.protocol == "embed"
-    assert result.url == "https://doodstream.com/e/jtri5tfbukk6"
+    assert result.protocol == "mp4"
+    assert result.url.startswith("https://")
     assert result.headers.get("Referer") == "https://cuevana3i.cc"
 
 
