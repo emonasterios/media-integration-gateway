@@ -238,7 +238,9 @@ async def test_get_catalog_with_category(adapter):
 
     items = await adapter.get_catalog(category="accion")
 
-    adapter._client.get.assert_called_once_with("/genero/accion/")
+    # Con paginación el adapter hace varias llamadas; verificar que la primera
+    # fue a la URL de categoría
+    adapter._client.get.assert_any_call("/genero/accion/")
     assert len(items) >= 1
 
 
@@ -322,12 +324,22 @@ async def test_resolve_playback_from_data_mdl(adapter):
     """Validar resolve_playback resuelve servidores usando data-mdl (sin iframe inicial)."""
     adapter._client.get.return_value = MockResponse(PLAYBACK_HTML)
 
+    # Ya no hay fallback a embed: mockear la resolución directa del resolver
+    mock_direct = PlaybackDescriptor(
+        protocol="mp4",
+        url="https://cdn.example.com/video.mp4?token=abc&expiry=123",
+        headers={"Referer": "https://doodstream.com"},
+    )
+    adapter._video_resolver.resolve_doodstream = AsyncMock(return_value=mock_direct)
+
     result = await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
 
     assert isinstance(result, PlaybackDescriptor)
-    assert result.protocol == "embed"
-    assert "doodstream.com" in result.url
-    assert result.headers.get("Referer") == "https://cuevana3i.cc"
+    assert result.protocol == "mp4"
+    assert result.url == mock_direct.url
+    adapter._video_resolver.resolve_doodstream.assert_awaited_once_with(
+        "https://doodstream.com/e/abc123"
+    )
 
 
 @pytest.mark.asyncio
@@ -335,11 +347,22 @@ async def test_resolve_playback_from_div_data_mdl(adapter):
     """Validar resolve_playback con div._3CT5n_0 y data-mdl (sin iframe)."""
     adapter._client.get.return_value = MockResponse(PLAYBACK_HTML_NO_IFRAME)
 
+    # Ya no hay fallback a embed: mockear la resolución directa del resolver
+    mock_direct = PlaybackDescriptor(
+        protocol="mp4",
+        url="https://cdn.example.com/video.mp4?token=abc&expiry=123",
+        headers={"Referer": "https://doodstream.com"},
+    )
+    adapter._video_resolver.resolve_doodstream = AsyncMock(return_value=mock_direct)
+
     result = await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
 
     assert isinstance(result, PlaybackDescriptor)
-    assert result.protocol == "embed"
-    assert "doodstream.com" in result.url
+    assert result.protocol == "mp4"
+    assert result.url == mock_direct.url
+    adapter._video_resolver.resolve_doodstream.assert_awaited_once_with(
+        "https://doodstream.com/e/xyz789"
+    )
 
 
 @pytest.mark.asyncio
@@ -356,10 +379,10 @@ async def test_resolve_playback_from_scripts(adapter):
     """
     adapter._client.get.return_value = MockResponse(html_no_list)
 
-    result = await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
-
-    assert isinstance(result, PlaybackDescriptor)
-    assert "filemoon.sx" in result.url
+    # filemoon no tiene resolver directo y ya no existe fallback a embed:
+    # el candidato se extrae del script pero la resolución lanza ValueError
+    with pytest.raises(ValueError, match="Ningún servidor funcionó"):
+        await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
 
 
 @pytest.mark.asyncio
@@ -384,9 +407,17 @@ async def test_resolve_playback_http_error_continues(adapter):
     
     adapter._client.get.side_effect = mock_get
 
+    mock_direct = PlaybackDescriptor(
+        protocol="mp4",
+        url="https://cdn.example.com/video.mp4?token=abc&expiry=123",
+        headers={"Referer": "https://doodstream.com"},
+    )
+    adapter._video_resolver.resolve_doodstream = AsyncMock(return_value=mock_direct)
+
     result = await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
 
     assert isinstance(result, PlaybackDescriptor)
+    assert result.protocol == "mp4"
     assert call_count[0] == 2  # Intentó película y luego serie
 
 
@@ -533,7 +564,7 @@ async def test_resolve_playback_direct_video_doodstream(adapter):
 
 @pytest.mark.asyncio
 async def test_resolve_playback_doodstream_fallback_on_failure(adapter):
-    """Validar fallback a embed cuando VideoResolver devuelve None."""
+    """Validar que si VideoResolver devuelve None NO hay fallback a embed (ValueError)."""
     from unittest.mock import AsyncMock
     
     # Mockear VideoResolver para devolver None (fallo en resolución directa)
@@ -542,11 +573,9 @@ async def test_resolve_playback_doodstream_fallback_on_failure(adapter):
     # HTML con servidor Doodstream
     adapter._client.get.return_value = MockResponse(PLAYBACK_HTML)
 
-    result = await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
-
-    assert isinstance(result, PlaybackDescriptor)
-    assert result.protocol == "embed"
-    assert "doodstream.com" in result.url
+    # Sin fallback a embed: la resolución fallida lanza ValueError
+    with pytest.raises(ValueError, match="Ningún servidor funcionó"):
+        await adapter.resolve_playback("cuevana3:pelicula-prueba-2026")
     adapter._video_resolver.resolve_doodstream.assert_awaited_once()
 
 

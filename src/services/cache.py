@@ -91,9 +91,12 @@ class CatalogCache:
             source = Source(media_id=media.id, **src)
             self.db.add(source)
 
+        # Capturar el ID antes del commit: con expire_on_commit=True (default),
+        # acceder a media.id tras el commit dispara MissingGreenlet
+        media_id = media.id
         await self.db.commit()
         # Recargar con sources sin usar refresh (evita MissingGreenlet)
-        stmt = select(Media).options(selectinload(Media.sources)).where(Media.id == media.id)
+        stmt = select(Media).options(selectinload(Media.sources)).where(Media.id == media_id)
         result = await self.db.execute(stmt)
         media = result.scalar_one()
         return media
