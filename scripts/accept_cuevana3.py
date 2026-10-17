@@ -8,10 +8,15 @@ las pruebas unitarias también, porque usaban HTML inventado a partir de una pre
 Aquí lo esperado se saca del HTML CRUDO de la página con expresiones regulares propias, sin
 pasar por el adapter: si el adapter lee otra cosa que la que está en la página, da rojo.
 Sale 0 solo si todas las comprobaciones pasan; imprime cada una.
+
+(2026-10-17) La reproducción ya no devuelve el embed crudo de li[data-server]: el gateway
+resuelve a video directo (mediaflow-proxy). La compuerta verifica EN VIVO que la URL
+devuelta sirva video real y que no sea ninguno de los embeds crudos de la página.
 """
 import asyncio
 import html as htmllib
 import re
+import ssl
 import sys
 from pathlib import Path
 
@@ -41,6 +46,31 @@ def sin_espacios(t) -> str:
     # La sinopsis lleva <strong> dentro: según cómo se extraiga, cambian los espacios alrededor.
     # Lo que se comprueba es de DÓNDE sale el texto, no su espaciado.
     return re.sub(r"\s+", "", t or "")
+
+
+async def sirve_video_directo(url: str, headers: dict | None = None) -> tuple[bool, str]:
+    """Verifica EN VIVO que una URL de reproducción sirva video real (no HTML de embed)."""
+    h = {"User-Agent": "Mozilla/5.0", **(headers or {})}
+    # Igual que _validate_video_url del gateway: estos CDN usan TLS con certificados vencidos.
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20, headers=h,
+                                     verify=ssl_context) as c:
+            r = await c.head(url)
+        ct = (r.headers.get("content-type") or "").lower()
+        if r.status_code >= 400:
+            return False, f"HEAD {r.status_code} para {url[:80]}"
+        if any(t in ct for t in ("text/html", "text/plain", "application/json")):
+            return False, f"content-type no-video ({ct or 'vacío'}) para {url[:80]}"
+        if any(t in ct for t in ("video/", "mpegurl", "octet-stream", "binary")):
+            return True, f"directo {r.status_code} {ct or 'sin CT'}"
+        if r.status_code in (200, 206):
+            return True, f"directo {r.status_code} sin CT claro"
+        return False, f"HEAD {r.status_code} para {url[:80]}"
+    except (httpx.TimeoutException, httpx.HTTPError) as e:
+        return False, f"error HEAD {url[:80]}: {e}"
 
 
 async def esperado_de_la_pagina(slug: str) -> dict:
@@ -86,8 +116,9 @@ async def main() -> int:
                   f"obtenido {d.year}, esperado {esp['year']}")
             try:
                 p = await a.resolve_playback(it.provider_id)
-                check("reproducción: URL es uno de los li[data-server] de la página",
-                      p.url in esp["servers"], f"obtenido {p.url}")
+                ok, detalle = await sirve_video_directo(p.url, p.headers)
+                check("reproducción: video directo resuelto desde los servidores de la página",
+                      ok and p.url not in esp["servers"], f"obtenido {p.url[:100]} — {detalle}")
             except Exception as e:  # noqa: BLE001
                 check("reproducción resuelta", False, f"{type(e).__name__}: {e}")
     finally:

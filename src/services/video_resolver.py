@@ -139,6 +139,12 @@ class VideoResolver:
         Returns:
             PlaybackDescriptor con protocol="mp4" y la URL directa, o None si falla.
         """
+        # Intentar con mediaflow-proxy primero
+        from src.services.mediaflow_bridge import resolve_with_mediaflow
+        result = await resolve_with_mediaflow(embed_url, "doodstream.com")
+        if result:
+            return result
+
         # 1. Obtener la página de embed
         try:
             resp = await self._client.get(embed_url)
@@ -208,6 +214,12 @@ class VideoResolver:
         Resuelve la URL de embed de Voe.sx a una URL de video directo (m3u8/mp4).
         Usa FlareSolverr para bypass del anti-bot.
         """
+        # Intentar con mediaflow-proxy primero
+        from src.services.mediaflow_bridge import resolve_with_mediaflow
+        result = await resolve_with_mediaflow(embed_url, "voe.sx")
+        if result:
+            return result
+
         from src.services.flaresolverr import FlareSolverrClient
 
         flaresolverr = FlareSolverrClient()

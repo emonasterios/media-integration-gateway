@@ -21,7 +21,7 @@ os.environ["DATABASE_URL"] = f"sqlite:///{DB}"
 from fastapi.testclient import TestClient  # noqa: E402
 
 from src.adapters.cuevana3 import Cuevana3Adapter  # noqa: E402
-from src.db.database import SessionLocal, init_db  # noqa: E402
+from src.db.database import AsyncSessionLocal, init_db  # noqa: E402
 from src.services.cache import CatalogCache  # noqa: E402
 from src.services.catalog import CatalogService  # noqa: E402
 
@@ -35,9 +35,9 @@ def check(ok, msg):
 
 
 async def segunda_consulta_sin_sitio():
-    init_db()
+    await init_db()
     a = Cuevana3Adapter()
-    svc = CatalogService([a], cache=CatalogCache(SessionLocal()))
+    svc = CatalogService([a], cache=CatalogCache(AsyncSessionLocal()))
     res = await svc.search("signal")
     items = [i for r in res for i in r.items]
     check(bool(items), f"búsqueda en vivo devuelve resultados — {len(items)}")
