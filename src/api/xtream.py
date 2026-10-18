@@ -122,7 +122,12 @@ async def xtream_player_api(
     if action == "get_vod_streams":
         catalog = await catalog_service.get_catalog("cuevana3")
         catalog2 = await catalog_service.get_catalog("cuevan_net")
-        movies = [item for item in catalog + catalog2 if item.media_type == MediaType.MOVIE]
+        seen_ids: set[str] = set()
+        movies: list[MediaItem] = []
+        for item in catalog + catalog2:
+            if item.media_type == MediaType.MOVIE and item.provider_id not in seen_ids:
+                seen_ids.add(item.provider_id)
+                movies.append(item)
         return [_media_item_to_vod_stream(item, idx) for idx, item in enumerate(movies, 1)]
 
     if action == "get_vod_info":
@@ -134,7 +139,13 @@ async def xtream_player_api(
 
         catalog = await catalog_service.get_catalog("cuevana3")
         catalog2 = await catalog_service.get_catalog("cuevan_net")
-        item = _stream_id_to_media(stream_id, "movie", catalog + catalog2)
+        seen_vod_info_ids: set[str] = set()
+        dedup_catalog: list[MediaItem] = []
+        for item in catalog + catalog2:
+            if item.provider_id not in seen_vod_info_ids:
+                seen_vod_info_ids.add(item.provider_id)
+                dedup_catalog.append(item)
+        item = _stream_id_to_media(stream_id, "movie", dedup_catalog)
         if item is None:
             return {}
 
@@ -158,7 +169,12 @@ async def xtream_player_api(
     if action == "get_series":
         catalog = await catalog_service.get_catalog("cuevana3")
         catalog2 = await catalog_service.get_catalog("cuevan_net")
-        series = [item for item in catalog + catalog2 if item.media_type == MediaType.SERIES]
+        seen_series_ids: set[str] = set()
+        series: list[MediaItem] = []
+        for item in catalog + catalog2:
+            if item.media_type == MediaType.SERIES and item.provider_id not in seen_series_ids:
+                seen_series_ids.add(item.provider_id)
+                series.append(item)
         return [_media_item_to_series_stream(item, idx) for idx, item in enumerate(series, 1)]
 
     if action == "get_live_streams":
@@ -189,7 +205,13 @@ async def xtream_player_api(
         if not query:
             return []
         search_results = await catalog_service.search(query)
-        movies = [item for sr in search_results for item in sr.items if item.media_type == MediaType.MOVIE]
+        seen_search_ids: set[str] = set()
+        movies: list[MediaItem] = []
+        for sr in search_results:
+            for item in sr.items:
+                if item.media_type == MediaType.MOVIE and item.provider_id not in seen_search_ids:
+                    seen_search_ids.add(item.provider_id)
+                    movies.append(item)
         return [_media_item_to_vod_stream(item, idx) for idx, item in enumerate(movies, 1)]
 
     if action == "search_series":
@@ -303,9 +325,25 @@ async def stream_movie(
         logger.error("No se pudo resolver video real para embed: %s", result.url)
         raise HTTPException(status_code=500, detail="No se pudo resolver fuente de video")
 
-    # Si es video directo (hls/mp4), redirigir al CDN
-    if result.protocol in ("hls", "mp4"):
-        logger.info("Redirecting to direct %s URL: %s", result.protocol, result.url[:80])
+    if result.protocol == "mp4":
+        proxy_headers = {
+            "Referer": "https://cuevana3.li",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
+        range_header = request.headers.get("range")
+        if range_header:
+            proxy_headers["Range"] = range_header
+
+        logger.info("Proxying mp4 URL: %s", result.url[:80])
+        return StreamingResponse(
+            _proxy_stream(result.url, proxy_headers),
+            status_code=206 if range_header else 200,
+            media_type="video/mp4",
+            headers={"Accept-Ranges": "bytes"},
+        )
+
+    if result.protocol == "hls":
+        logger.info("Redirecting to HLS URL: %s", result.url[:80])
         return RedirectResponse(url=result.url, status_code=302)
 
     # Si no es directo ni se pudo resolver
@@ -314,10 +352,9 @@ async def stream_movie(
 
 async def _proxy_stream(url: str, headers: dict):
     """Generador que hace proxy del stream de video con soporte de rangos."""
-    async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=10.0)) as client:
-        async with client.stream("GET", url, headers=headers) as resp:
-            resp.raise_for_status()
-            async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
+    async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+        async with client.stream("GET", url, headers=headers) as response:
+            async for chunk in response.aiter_bytes(chunk_size=65536):
                 yield chunk
 
 

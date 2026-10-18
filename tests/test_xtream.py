@@ -323,8 +323,8 @@ def test_player_api_get_vod_info(client):
 def test_movie_route_accepts_extension(client):
     """La ruta .mp4 no debe caer en la variante extensionless y responder 422."""
     r = client.get("/movie/test/test/1001.mp4", follow_redirects=False)
-    assert r.status_code == 302
-    assert r.headers["location"] == "https://example.com/video.mp4"
+    assert r.status_code == 200
+    assert "video/mp4" in r.headers["content-type"]
 
 
 def test_player_api_get_series(client):
