@@ -352,7 +352,7 @@ async def stream_movie(
 
 async def _proxy_stream(url: str, headers: dict):
     """Generador que hace proxy del stream de video con soporte de rangos."""
-    async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=60.0, verify=False) as client:
         async with client.stream("GET", url, headers=headers) as response:
             async for chunk in response.aiter_bytes(chunk_size=65536):
                 yield chunk
