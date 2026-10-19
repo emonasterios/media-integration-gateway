@@ -3,6 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
+from pathlib import Path
+
+# Agregar el directorio raíz del proyecto al sys.path para poder importar src
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sqlalchemy import or_
 
