@@ -20,6 +20,7 @@ class Media(Base):
     year = Column(Integer, nullable=True)
     synopsis = Column(Text, nullable=True)
     poster_url = Column(String, nullable=True)
+    genres = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

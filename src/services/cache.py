@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -38,6 +39,8 @@ class CatalogCache:
         stmt = select(Media).options(selectinload(Media.sources)).where(Media.id == media.id)
         result = await self.db.execute(stmt)
         media = result.scalar_one()
+        if media.genres and isinstance(media.genres, str):
+            media.genres = json.loads(media.genres)
         return media
 
     async def get_by_source(self, provider: str, provider_id: str) -> Optional[Media]:
@@ -55,6 +58,8 @@ class CatalogCache:
         media = result.scalar_one_or_none()
         if media is None or not self.is_valid(media):
             return None
+        if media.genres and isinstance(media.genres, str):
+            media.genres = json.loads(media.genres)
         return media
 
     async def save_media(self, item_data: dict, sources_data: list[dict]) -> Media:
@@ -64,6 +69,9 @@ class CatalogCache:
         media_type = item_data.get("media_type")
 
         # Buscar existente
+        if "genres" in item_data and isinstance(item_data["genres"], list):
+            item_data["genres"] = json.dumps(item_data["genres"])
+
         stmt = select(Media).filter(Media.title == title)
         if media_type:
             stmt = stmt.filter(Media.media_type == media_type)

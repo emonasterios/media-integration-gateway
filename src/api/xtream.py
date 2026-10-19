@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Optional
@@ -20,19 +21,6 @@ def _get_catalog_service() -> CatalogService:
     raise NotImplementedError("CatalogService no configurado")
 
 
-def _build_genre_categories(movies: list[MediaItem]) -> list[dict]:
-    genres: set[str] = set()
-    for m in movies:
-        genres.update(m.genres or [])
-    if not genres:
-        return [{"category_id": "1", "category_name": "Peliculas", "parent_id": 0}]
-    sorted_genres = sorted(genres)
-    return [
-        {"category_id": str(i + 1), "category_name": g, "parent_id": 0}
-        for i, g in enumerate(sorted_genres)
-    ]
-
-
 def _genre_to_id(genres: list[str], sorted_genres: list[str]) -> str:
     if not genres or not sorted_genres:
         return "1"
@@ -40,6 +28,25 @@ def _genre_to_id(genres: list[str], sorted_genres: list[str]) -> str:
     if first in sorted_genres:
         return str(sorted_genres.index(first) + 1)
     return "1"
+
+
+def _build_genre_categories(genres_or_items: list | set | None = None) -> list[dict]:
+    """Construye la lista de categorías VOD a partir de géneros o MediaItems."""
+    genres: set[str] = set()
+    if genres_or_items:
+        for item in genres_or_items:
+            if isinstance(item, str):
+                genres.add(item)
+            elif hasattr(item, "genres") and item.genres:
+                genres.update(item.genres)
+            elif isinstance(item, dict) and "genres" in item:
+                genres.update(item["genres"])
+    if genres:
+        return [
+            {"category_id": str(idx), "category_name": genre_name, "parent_id": 0}
+            for idx, genre_name in enumerate(sorted(genres), 1)
+        ]
+    return [{"category_id": "1", "category_name": "Peliculas", "parent_id": 0}]
 
 
 def _media_item_to_vod_stream(item: MediaItem, index: int, sorted_genres: list[str] | None = None) -> dict:
@@ -133,21 +140,34 @@ async def xtream_player_api(
     }
 
     if action == "get_vod_categories":
-        # Construir categorías desde el caché sin forzar scrapeo.
-        # Si el caché está vacío (container recién iniciado), devolver fallback
-        # hardcodeado para no bloquear al cliente IPTV.
-        cat1 = catalog_service._catalog_cache.get(("cuevana3", None))
-        cat2 = catalog_service._catalog_cache.get(("cuevan_net", None))
+        genres: set[str] = set()
+        try:
+            conn = catalog_service.db.get_connection()
+        except AttributeError:
+            conn = None
+        if conn is not None:
+            cursor = conn.execute(
+                "SELECT DISTINCT genres FROM media WHERE media_type='movie' AND genres IS NOT NULL AND genres != '[]'"
+            )
+            for row in cursor.fetchall():
+                try:
+                    for genre in json.loads(row[0]):
+                        genres.add(genre)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+        if genres:
+            return _build_genre_categories(genres)
+        # Fallback: leer del caché en memoria de catalog_service
         movies: list[MediaItem] = []
-        if cat1 is not None or cat2 is not None:
-            seen_ids: set[str] = set()
-            for item in (cat1[1] if cat1 else []) + (cat2[1] if cat2 else []):
-                if item.media_type == MediaType.MOVIE and item.provider_id not in seen_ids:
-                    seen_ids.add(item.provider_id)
+        cache = getattr(catalog_service, "_catalog_cache", {})
+        for key, value in cache.items():
+            # value es (timestamp, list[MediaItem])
+            items = value[1] if isinstance(value, tuple) else value
+            for item in items:
+                if getattr(item, "media_type", None) == MediaType.MOVIE:
                     movies.append(item)
         if movies:
             return _build_genre_categories(movies)
-        # Fallback: caché vacío, devolver categoría genérica
         return [{"category_id": "1", "category_name": "Peliculas", "parent_id": 0}]
 
     if action == "get_series_categories":
