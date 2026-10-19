@@ -9,7 +9,7 @@ from pathlib import Path
 # Agregar el directorio raíz del proyecto al sys.path para poder importar src
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sqlalchemy import or_
+from sqlalchemy import or_, select
 
 from src.adapters.cuevana3 import Cuevana3Adapter
 from src.db.database import AsyncSessionLocal
@@ -24,14 +24,14 @@ async def enrich_genres(limit: int | None = None, provider: str = "cuevana3") ->
     processed = 0
 
     async with AsyncSessionLocal() as session:
-        query = session.query(Media).filter(
+        stmt = select(Media).where(
             Media.media_type == "movie",
             or_(Media.genres.is_(None), Media.genres == "[]"),
         )
         if limit is not None:
-            query = query.limit(limit)
+            stmt = stmt.limit(limit)
 
-        result = await session.execute(query.statement)
+        result = await session.execute(stmt)
         movies = result.scalars().all()
 
         for media in movies:
