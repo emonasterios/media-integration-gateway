@@ -2,6 +2,17 @@
 
 Todos los cambios notables en este proyecto.
 
+## [0.4.0] - 2026-10-19
+
+### Fixed
+- Deduplicación de catálogo por provider_id (evita películas repetidas en IPTV)
+- Proxy de video MP4 con headers Referer/User-Agent (resuelve error 500 en reproducción)
+
+### Added
+- Integración mediaflow-proxy para bypass de Cloudflare (curl-cffi)
+- Script de deploy automático a vm-infra (`scripts/deploy.sh`)
+- Documentación de despliegue en README
+
 ## [0.1.0] — 2026-10-03
 
 ### Adapters

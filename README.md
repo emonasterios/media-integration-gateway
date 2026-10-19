@@ -239,3 +239,47 @@ curl http://localhost:9193/healthz
 ## Licencia
 
 Uso personal.
+
+## Despliegue
+
+El gateway corre en vm-infra (192.168.122.120) vía Docker Compose, integrado con mediaflow (mediaflow-proxy) para la resolución de streams protegidos.
+
+### Deploy automático
+
+```bash
+./scripts/deploy.sh
+```
+
+### Deploy manual
+
+```bash
+# Subir código a vm-infra
+tar czf /tmp/gateway.tar.gz --exclude='.git' --exclude='.venv' --exclude='__pycache__' .
+scp /tmp/gateway.tar.gz root@192.168.122.120:/opt/media-integration-gateway/
+
+# En vm-infra
+ssh root@192.168.122.120
+cd /opt/media-integration-gateway
+tar xzf /tmp/gateway.tar.gz -C .
+docker compose build --no-cache
+docker compose up -d
+```
+
+### Verificar
+
+```bash
+# Health check
+ssh root@192.168.122.120 "docker inspect --format='{{.State.Health.Status}}' media-integration-gateway"
+
+# Logs
+ssh root@192.168.122.120 "docker logs media-integration-gateway --tail 50"
+
+# Probar catálogo
+curl -s 'http://192.168.122.120:9193/player_api.php?username=test&password=test&action=get_vod_categories'
+```
+
+### Acceso desde IPTV
+
+- **Server URL**: `http://100.78.94.51:9193` (vía Tailscale)
+- **Username**: `test`
+- **Password**: `test`
