@@ -154,7 +154,19 @@ def app_with_db(db_engine):
 
 @pytest.fixture()
 def client(app_with_db):
-    """TestClient con la app configurada."""
+    """TestClient con la app configurada y catálogo precargado."""
+    # Precargar el caché interno para que get_vod_categories funcione
+    svc = app_with_db.dependency_overrides.get(_get_catalog_service)
+    if svc is not None:
+        import asyncio
+        # dependency_overrides usa lambdas: llamar para obtener el servicio
+        catalog = svc() if callable(svc) else svc
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(catalog.get_catalog("cuevana3"))
+            loop.run_until_complete(catalog.get_catalog("cuevan_net"))
+        finally:
+            loop.close()
     with TestClient(app_with_db) as c:
         yield c
 

@@ -133,15 +133,22 @@ async def xtream_player_api(
     }
 
     if action == "get_vod_categories":
-        catalog = await catalog_service.get_catalog("cuevana3")
-        catalog2 = await catalog_service.get_catalog("cuevan_net")
-        seen_ids: set[str] = set()
-        unique_movies: list[MediaItem] = []
-        for item in catalog + catalog2:
-            if item.media_type == MediaType.MOVIE and item.provider_id not in seen_ids:
-                seen_ids.add(item.provider_id)
-                unique_movies.append(item)
-        return _build_genre_categories(unique_movies)
+        # Construir categorías desde el caché sin forzar scrapeo.
+        # Si el caché está vacío (container recién iniciado), devolver fallback
+        # hardcodeado para no bloquear al cliente IPTV.
+        cat1 = catalog_service._catalog_cache.get(("cuevana3", None))
+        cat2 = catalog_service._catalog_cache.get(("cuevan_net", None))
+        movies: list[MediaItem] = []
+        if cat1 is not None or cat2 is not None:
+            seen_ids: set[str] = set()
+            for item in (cat1[1] if cat1 else []) + (cat2[1] if cat2 else []):
+                if item.media_type == MediaType.MOVIE and item.provider_id not in seen_ids:
+                    seen_ids.add(item.provider_id)
+                    movies.append(item)
+        if movies:
+            return _build_genre_categories(movies)
+        # Fallback: caché vacío, devolver categoría genérica
+        return [{"category_id": "1", "category_name": "Peliculas", "parent_id": 0}]
 
     if action == "get_series_categories":
         return [{"category_id": "2", "category_name": "Series", "parent_id": 0}]

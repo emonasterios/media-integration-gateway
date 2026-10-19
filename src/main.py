@@ -64,6 +64,19 @@ def create_app(override_catalog: Optional[CatalogService] = None) -> FastAPI:
             from src.api.xtream import _get_catalog_service as _xtream_get_catalog
             app.dependency_overrides[_get_catalog] = lambda: catalog
             app.dependency_overrides[_xtream_get_catalog] = lambda: catalog
+            # Warm-up: precargar catálogo en segundo plano para que las categorías
+            # estén listas cuando el IPTV las pida
+            async def _warmup():
+                try:
+                    await catalog.get_catalog("cuevana3")
+                except Exception:
+                    pass
+                try:
+                    await catalog.get_catalog("cuevan_net")
+                except Exception:
+                    pass
+            import asyncio
+            asyncio.create_task(_warmup())
             yield
             await adapter.close()
             await cuevan_net.close()

@@ -182,12 +182,14 @@ class CatalogService:
         return await self.get_provider(provider).resolve_playback(media_id)
 
     async def get_catalog(
-        self, provider: str, category: str | None = None
+        self, provider: str, category: str | None = None, _allow_stale: bool = False
     ) -> list[MediaItem]:
         key = (provider, category)
         now = time.monotonic()
         cached = self._catalog_cache.get(key)
         if cached is not None and now - cached[0] < self._catalog_ttl_seconds:
+            return cached[1]
+        if _allow_stale and cached is not None:
             return cached[1]
 
         lock = self._catalog_locks.setdefault(key, asyncio.Lock())
@@ -195,6 +197,8 @@ class CatalogService:
             now = time.monotonic()
             cached = self._catalog_cache.get(key)
             if cached is not None and now - cached[0] < self._catalog_ttl_seconds:
+                return cached[1]
+            if _allow_stale and cached is not None:
                 return cached[1]
             catalog = await self.get_provider(provider).get_catalog(category)
             self._catalog_cache[key] = (time.monotonic(), catalog)
