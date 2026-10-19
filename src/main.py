@@ -67,14 +67,14 @@ def create_app(override_catalog: Optional[CatalogService] = None) -> FastAPI:
             # Warm-up: precargar catálogo en segundo plano para que las categorías
             # estén listas cuando el IPTV las pida
             async def _warmup():
-                try:
-                    await catalog.get_catalog("cuevana3")
-                except Exception:
-                    pass
-                try:
-                    await catalog.get_catalog("cuevan_net")
-                except Exception:
-                    pass
+                import logging
+                logger = logging.getLogger(__name__)
+                for provider in ["cuevana3", "cuevan_net"]:
+                    try:
+                        items = await catalog.get_catalog(provider)
+                        logger.info(f"Warmup {provider}: {len(items)} items en caché")
+                    except Exception as e:
+                        logger.warning(f"Warmup {provider} falló: {e}")
             import asyncio
             asyncio.create_task(_warmup())
             yield
