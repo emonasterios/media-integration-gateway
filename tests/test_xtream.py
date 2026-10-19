@@ -11,7 +11,9 @@ from src.db.database import Base, get_db
 from src.services.catalog import CatalogService
 from src.adapters.base import MediaProvider
 from src.models.catalog import MediaItem, MediaType, SearchResult, PlaybackDescriptor, Season, Episode
-from src.api.xtream import _get_catalog_service
+from src.api.xtream import _get_catalog_service, _build_genre_categories, _genre_to_id
+
+
 
 
 class FakeCuevana3Provider(MediaProvider):
@@ -50,6 +52,7 @@ class FakeCuevana3Provider(MediaProvider):
                 poster_url="https://example.com/movie1.jpg",
                 overview="Descripción película 1",
                 year=2023,
+                genres=["Acción", "Drama"],
             ),
             MediaItem(
                 media_id="cuevana3:movie2",
@@ -60,6 +63,7 @@ class FakeCuevana3Provider(MediaProvider):
                 poster_url="https://example.com/movie2.jpg",
                 overview="Descripción película 2",
                 year=2024,
+                genres=["Comedia"],
             ),
             MediaItem(
                 media_id="cuevana3:series1",
@@ -110,6 +114,7 @@ class FakeCuevanNetProvider(MediaProvider):
                 poster_url="https://example.com/cn1.jpg",
                 overview="Descripción CN 1",
                 year=2024,
+                genres=["Acción"],
             ),
         ]
 
@@ -236,16 +241,60 @@ def test_player_api_honors_forwarded_https(client):
     assert server_info["server_protocol"] == "https"
 
 
-def test_player_api_get_vod_categories(client):
-    """GET /player_api.php?action=get_vod_categories responde con categoría Películas."""
-    r = client.get("/player_api.php?username=test&password=test&action=get_vod_categories")
+def test_genre_category_helpers():
+    """_build_genre_categories y _genre_to_id generan IDs secuenciales por género."""
+    movies = [
+        MediaItem(
+            media_id="m1",
+            title="Movie 1",
+            media_type=MediaType.MOVIE,
+            provider="cuevana3",
+            provider_id="m1",
+            genres=["Acción", "Drama"],
+        ),
+        MediaItem(
+            media_id="m2",
+            title="Movie 2",
+            media_type=MediaType.MOVIE,
+            provider="cuevana3",
+            provider_id="m2",
+            genres=["Comedia"],
+        ),
+        MediaItem(
+            media_id="m3",
+            title="Movie 3",
+            media_type=MediaType.MOVIE,
+            provider="cuevana3",
+            provider_id="m3",
+            genres=[],
+        ),
+    ]
+
+    categories = _build_genre_categories(movies)
+    assert categories == [
+        {"category_id": "1", "category_name": "Acción", "parent_id": 0},
+        {"category_id": "2", "category_name": "Comedia", "parent_id": 0},
+        {"category_id": "3", "category_name": "Drama", "parent_id": 0},
+    ]
+    assert _genre_to_id(["Acción"], ["Acción", "Comedia", "Drama"]) == "1"
+    assert _genre_to_id(["Drama"], ["Acción", "Comedia", "Drama"]) == "3"
+    assert _genre_to_id([], ["Acción", "Comedia", "Drama"]) == "1"
+
+
+@pytest.mark.parametrize(
+    "action, expected",
+    [("get_vod_categories", [
+        {"category_id": "1", "category_name": "Acción", "parent_id": 0},
+        {"category_id": "2", "category_name": "Comedia", "parent_id": 0},
+        {"category_id": "3", "category_name": "Drama", "parent_id": 0},
+    ])],
+)
+def test_player_api_get_vod_categories(client, action, expected):
+    """GET /player_api.php?action=get_vod_categories responde categorías dinámicas ordenadas."""
+    r = client.get(f"/player_api.php?username=test&password=test&action={action}")
     assert r.status_code == 200
     data = r.json()
-    assert isinstance(data, list)
-    assert len(data) == 1
-    assert data[0]["category_id"] == "1"
-    assert data[0]["category_name"] == "Peliculas"
-    assert data[0]["parent_id"] == 0
+    assert data == expected
 
 
 def test_player_api_get_series_categories(client):
@@ -306,6 +355,23 @@ def test_player_api_get_vod_streams(client):
     assert stream2["num"] == 2
     assert stream2["name"] == "Película Test 2"
     assert stream2["stream_id"] == 1002
+
+
+def test_player_api_get_vod_streams_filtered_by_category(client):
+    """GET /player_api.php?action=get_vod_streams&category_id filtra por género y mantiene category_id correcto."""
+    r = client.get("/player_api.php?username=test&password=test&action=get_vod_streams&category_id=1")
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) == 2
+    assert [item["name"] for item in data] == ["Película Test 1", "Película CN 1"]
+    assert all(item["category_id"] == "1" for item in data)
+
+    r = client.get("/player_api.php?username=test&password=test&action=get_vod_streams&category_id=2")
+    assert r.status_code == 200
+    data = r.json()
+    assert len(data) == 1
+    assert data[0]["name"] == "Película Test 2"
+    assert data[0]["category_id"] == "2"
 
 
 def test_player_api_get_vod_info(client):

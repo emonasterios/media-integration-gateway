@@ -20,7 +20,29 @@ def _get_catalog_service() -> CatalogService:
     raise NotImplementedError("CatalogService no configurado")
 
 
-def _media_item_to_vod_stream(item: MediaItem, index: int) -> dict:
+def _build_genre_categories(movies: list[MediaItem]) -> list[dict]:
+    genres: set[str] = set()
+    for m in movies:
+        genres.update(m.genres or [])
+    if not genres:
+        return [{"category_id": "1", "category_name": "Peliculas", "parent_id": 0}]
+    sorted_genres = sorted(genres)
+    return [
+        {"category_id": str(i + 1), "category_name": g, "parent_id": 0}
+        for i, g in enumerate(sorted_genres)
+    ]
+
+
+def _genre_to_id(genres: list[str], sorted_genres: list[str]) -> str:
+    if not genres or not sorted_genres:
+        return "1"
+    first = genres[0]
+    if first in sorted_genres:
+        return str(sorted_genres.index(first) + 1)
+    return "1"
+
+
+def _media_item_to_vod_stream(item: MediaItem, index: int, sorted_genres: list[str] | None = None) -> dict:
     """Convierte MediaItem a dict de stream VOD Xtream Codes."""
     return {
         "num": index,
@@ -31,7 +53,7 @@ def _media_item_to_vod_stream(item: MediaItem, index: int) -> dict:
         "rating": "0",
         "rating_5based": 0.0,
         "added": str(int(item.year * 31536000)) if item.year else "",
-        "category_id": "1",
+        "category_id": _genre_to_id(item.genres, sorted_genres or []),
         "container_extension": "mp4",
         "custom_sid": "",
         "direct_source": "",
@@ -111,7 +133,15 @@ async def xtream_player_api(
     }
 
     if action == "get_vod_categories":
-        return [{"category_id": "1", "category_name": "Peliculas", "parent_id": 0}]
+        catalog = await catalog_service.get_catalog("cuevana3")
+        catalog2 = await catalog_service.get_catalog("cuevan_net")
+        seen_ids: set[str] = set()
+        unique_movies: list[MediaItem] = []
+        for item in catalog + catalog2:
+            if item.media_type == MediaType.MOVIE and item.provider_id not in seen_ids:
+                seen_ids.add(item.provider_id)
+                unique_movies.append(item)
+        return _build_genre_categories(unique_movies)
 
     if action == "get_series_categories":
         return [{"category_id": "2", "category_name": "Series", "parent_id": 0}]
@@ -120,15 +150,29 @@ async def xtream_player_api(
         return [{"category_id": "3", "category_name": "TV en Vivo", "parent_id": 0}]
 
     if action == "get_vod_streams":
+        category_id = request.query_params.get("category_id")
         catalog = await catalog_service.get_catalog("cuevana3")
         catalog2 = await catalog_service.get_catalog("cuevan_net")
         seen_ids: set[str] = set()
-        movies: list[MediaItem] = []
+        unique_movies: list[MediaItem] = []
         for item in catalog + catalog2:
             if item.media_type == MediaType.MOVIE and item.provider_id not in seen_ids:
                 seen_ids.add(item.provider_id)
-                movies.append(item)
-        return [_media_item_to_vod_stream(item, idx) for idx, item in enumerate(movies, 1)]
+                unique_movies.append(item)
+        genres_set: set[str] = set()
+        for m in unique_movies:
+            genres_set.update(m.genres or [])
+        sorted_genres = sorted(genres_set)
+        if category_id:
+            try:
+                idx = int(category_id)
+            except ValueError:
+                return []
+            if not (1 <= idx <= len(sorted_genres)):
+                return []
+            target_genre = sorted_genres[idx - 1]
+            unique_movies = [m for m in unique_movies if m.genres and target_genre in m.genres]
+        return [_media_item_to_vod_stream(item, idx, sorted_genres) for idx, item in enumerate(unique_movies, 1)]
 
     if action == "get_vod_info":
         vod_id = request.query_params.get("vod_id", "")
@@ -212,7 +256,8 @@ async def xtream_player_api(
                 if item.media_type == MediaType.MOVIE and item.provider_id not in seen_search_ids:
                     seen_search_ids.add(item.provider_id)
                     movies.append(item)
-        return [_media_item_to_vod_stream(item, idx) for idx, item in enumerate(movies, 1)]
+        sorted_genres = sorted({genre for item in movies for genre in (item.genres or [])})
+        return [_media_item_to_vod_stream(item, idx, sorted_genres) for idx, item in enumerate(movies, 1)]
 
     if action == "search_series":
         query = request.query_params.get("query", "")
