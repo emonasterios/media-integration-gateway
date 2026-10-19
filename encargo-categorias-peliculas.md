@@ -70,20 +70,7 @@ def _genre_to_id(genres: list[str], sorted_genres: list[str]) -> str:
 ## ACEPTACION
 ```bash
 cd /home/emon/media-integration-gateway && . .venv/bin/activate && pytest tests/ -v
-cd /home/emon/media-integration-gateway && . .venv/bin/activate && python -c "
-import asyncio, sys
-sys.path.insert(0, 'src')
-from api.xtream import _build_genre_categories
-from models.catalog import MediaItem, MediaType
-m1 = MediaItem(title='A', media_type=MediaType.MOVIE, provider_id='a', genres=['Acción', 'Thriller'])
-m2 = MediaItem(title='B', media_type=MediaType.MOVIE, provider_id='b', genres=['Comedia'])
-cats = _build_genre_categories([m1, m2])
-assert len(cats) == 3, f'Esperaba 3, got {len(cats)}'
-assert cats[0]['category_name'] == 'Acción'
-assert cats[1]['category_name'] == 'Comedia'
-assert cats[2]['category_name'] == 'Thriller'
-print(f'OK: {len(cats)} categorías')
-"
+cd /home/emon/media-integration-gateway && . .venv/bin/activate && python -c "import sys; sys.path.insert(0,'src'); from api.xtream import _build_genre_categories; from models.catalog import MediaItem, MediaType; m1=MediaItem(title='A',media_type=MediaType.MOVIE,provider_id='a',genres=['Acción','Thriller']); m2=MediaItem(title='B',media_type=MediaType.MOVIE,provider_id='b',genres=['Comedia']); cats=_build_genre_categories([m1,m2]); assert len(cats)==3,f'Esperaba 3 got {len(cats)}'; assert cats[0]['category_name']=='Acción'; assert cats[1]['category_name']=='Comedia'; assert cats[2]['category_name']=='Thriller'; print(f'OK: {len(cats)} categorías')"
 ```
 
 ## PREMISES
