@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -e ".[dev]"
 
 COPY src/ src/
 COPY tests/ tests/
+COPY scripts/ scripts/
 
 EXPOSE 8000
 
