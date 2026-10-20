@@ -488,11 +488,16 @@ def test_player_api_get_vod_info(client, temp_db_path):
         xtream_module.DB_PATH = original_db_path
 
 
-def test_movie_route_accepts_extension(client):
+def test_movie_route_accepts_extension(client, temp_db_path):
     """La ruta .mp4 no debe caer en la variante extensionless y responder 422."""
-    r = client.get("/movie/test/test/1001.mp4", follow_redirects=False)
-    assert r.status_code == 200
-    assert "video/mp4" in r.headers["content-type"]
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    try:
+        r = client.get("/movie/test/test/1001.mp4", follow_redirects=False)
+        assert r.status_code == 200
+        assert "video/mp4" in r.headers["content-type"]
+    finally:
+        xtream_module.DB_PATH = original_db_path
 
 
 def test_player_api_get_series(client):

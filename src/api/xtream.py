@@ -32,7 +32,7 @@ async def _load_catalog_from_db(db_path: Path | str | None = None) -> list[Media
     return [
         MediaItem(
             media_id=str(row[0]),
-            provider=str(row[0]),
+            provider="cuevana3",
             provider_id=str(row[0]),
             title=row[1],
             original_title=row[2],
