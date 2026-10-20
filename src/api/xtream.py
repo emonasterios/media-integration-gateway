@@ -406,9 +406,8 @@ async def stream_movie(
     catalog_service: CatalogService = Depends(_get_catalog_service),
 ):
     """Reproduce una película VOD. Hace proxy del video real con soporte de rangos."""
-    catalog = await catalog_service.get_catalog("cuevana3")
-    catalog2 = await catalog_service.get_catalog("cuevan_net")
-    media = _stream_id_to_media(stream_id, "movie", catalog + catalog2)
+    all_movies = await _load_catalog_from_db()
+    media = _stream_id_to_media(stream_id, "movie", all_movies)
     if not media:
         return {"error": "stream not found", "stream_id": stream_id}
 
