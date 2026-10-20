@@ -25,15 +25,19 @@ async def _load_catalog_from_db(db_path: Path | str | None = None) -> list[Media
         return []
     async with aiosqlite.connect(str(target)) as db:
         async with db.execute(
-            "SELECT id, title, original_title, media_type, year, synopsis, poster_url, genres "
-            "FROM media WHERE media_type = 'movie' ORDER BY title"
+            "SELECT m.id, m.title, m.original_title, m.media_type, m.year, m.synopsis, m.poster_url, m.genres, "
+            "s.url as source_url "
+            "FROM media m "
+            "LEFT JOIN sources s ON s.media_id = m.id AND s.provider = 'cuevana3' "
+            "WHERE m.media_type = 'movie' "
+            "ORDER BY m.title"
         ) as cur:
             rows = await cur.fetchall()
     return [
         MediaItem(
             media_id=str(row[0]),
             provider="cuevana3",
-            provider_id=str(row[0]),
+            provider_id=row[8] or str(row[0]),  # url de sources, fallback a id
             title=row[1],
             original_title=row[2],
             media_type=MediaType.MOVIE,

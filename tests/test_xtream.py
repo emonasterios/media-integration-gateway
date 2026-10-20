@@ -200,9 +200,20 @@ def temp_db_path(tmp_path):
         poster_url TEXT,
         genres TEXT
     )""")
+    conn.execute("""CREATE TABLE sources (
+        id INTEGER PRIMARY KEY,
+        media_id INTEGER,
+        provider TEXT,
+        url TEXT,
+        quality TEXT,
+        language TEXT
+    )""")
     conn.execute("INSERT INTO media VALUES (1, 'Test Movie', 'Test Movie', 'movie', 2024, 'Overview', 'http://poster.jpg', '[\"Acción\", \"Drama\"]')")
     conn.execute("INSERT INTO media VALUES (2, 'Another Movie', 'Another Movie', 'movie', 2023, 'Overview 2', 'http://poster2.jpg', '[\"Comedia\"]')")
     conn.execute("INSERT INTO media VALUES (3, 'Third Movie', 'Third Movie', 'movie', 2022, 'Overview 3', 'http://poster3.jpg', '[\"Terror\", \"Suspense\"]')")
+    conn.execute("INSERT INTO sources VALUES (1, 1, 'cuevana3', 'test-movie', 'auto', 'es')")
+    conn.execute("INSERT INTO sources VALUES (2, 2, 'cuevana3', 'another-movie', 'auto', 'es')")
+    conn.execute("INSERT INTO sources VALUES (3, 3, 'cuevana3', 'third-movie', 'auto', 'es')")
     conn.commit()
     conn.close()
     return db_path
