@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     allowed_origins: list[str] = Field(default_factory=lambda: ["*"])
-    DATABASE_URL: str = "sqlite:///./media_gateway.db"
+    DATABASE_URL: str = "sqlite+aiosqlite:///./media_gateway.db"
     CACHE_TTL_SECONDS: int = 3600
     FLARESOLVERR_URL: str = "http://flaresolverr:8191"
 
