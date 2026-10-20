@@ -2,15 +2,48 @@
 
 from __future__ import annotations
 
+import aiosqlite
 import json
 import logging
+import os.path
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Request, HTTPException
 
 from src.models.catalog import MediaItem, MediaType
 from src.services.catalog import CatalogService
+
+DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "gateway.db"
+
+
+async def _load_catalog_from_db(db_path: Path | str | None = None) -> list[MediaItem]:
+    """Carga el catálogo VOD desde SQLite. db_path permite tests con BD en memoria."""
+    target = Path(db_path) if db_path else DB_PATH
+    if not target.exists():
+        return []
+    async with aiosqlite.connect(str(target)) as db:
+        async with db.execute(
+            "SELECT id, title, original_title, media_type, year, synopsis, poster_url, genres "
+            "FROM media WHERE media_type = 'movie' ORDER BY title"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        MediaItem(
+            media_id=str(row[0]),
+            provider=str(row[0]),
+            provider_id=str(row[0]),
+            title=row[1],
+            original_title=row[2],
+            media_type=MediaType.MOVIE,
+            year=row[4],
+            overview=row[5],
+            poster_url=row[6],
+            genres=json.loads(row[7]) if row[7] else [],
+        )
+        for row in rows
+    ]
 
 
 router = APIRouter(tags=["xtream"])
@@ -47,6 +80,28 @@ def _build_genre_categories(genres_or_items: list | set | None = None) -> list[d
             for idx, genre_name in enumerate(sorted(genres), 1)
         ]
     return [{"category_id": "1", "category_name": "Peliculas", "parent_id": 0}]
+
+
+async def _enrich_genres_from_db(items: list[MediaItem], db_path: Path | str | None = None) -> list[MediaItem]:
+    """Lee géneros de la BD y los inyecta en los items que los tienen vacíos."""
+    target = Path(db_path) if db_path else DB_PATH
+    if not target.exists():
+        return items
+    try:
+        async with aiosqlite.connect(str(target)) as db:
+            async with db.execute(
+                "SELECT id, genres FROM media WHERE media_type='movie' AND genres IS NOT NULL AND genres != '[]'"
+            ) as cur:
+                db_genres = {str(row[0]): json.loads(row[1]) async for row in cur}
+        for item in items:
+            if not item.genres:
+                if item.provider_id in db_genres:
+                    item.genres = db_genres[item.provider_id]
+                elif item.media_id in db_genres:
+                    item.genres = db_genres[item.media_id]
+    except Exception:
+        pass
+    return items
 
 
 def _media_item_to_vod_stream(item: MediaItem, index: int, sorted_genres: list[str] | None = None) -> dict:
@@ -142,19 +197,18 @@ async def xtream_player_api(
     if action == "get_vod_categories":
         genres: set[str] = set()
         try:
-            conn = catalog_service.db.get_connection()
-        except AttributeError:
-            conn = None
-        if conn is not None:
-            cursor = conn.execute(
-                "SELECT DISTINCT genres FROM media WHERE media_type='movie' AND genres IS NOT NULL AND genres != '[]'"
-            )
-            for row in cursor.fetchall():
-                try:
-                    for genre in json.loads(row[0]):
-                        genres.add(genre)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    continue
+            async with aiosqlite.connect(str(DB_PATH)) as db:
+                async with db.execute(
+                    "SELECT genres FROM media WHERE media_type='movie' AND genres IS NOT NULL AND genres != '[]'"
+                ) as cursor:
+                    async for row in cursor:
+                        try:
+                            for genre in json.loads(row[0]):
+                                genres.add(genre)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
+        except Exception:
+            pass
         if genres:
             return _build_genre_categories(genres)
         # Fallback: leer del caché en memoria de catalog_service
@@ -178,14 +232,9 @@ async def xtream_player_api(
 
     if action == "get_vod_streams":
         category_id = request.query_params.get("category_id")
-        catalog = await catalog_service.get_catalog("cuevana3")
-        catalog2 = await catalog_service.get_catalog("cuevan_net")
-        seen_ids: set[str] = set()
-        unique_movies: list[MediaItem] = []
-        for item in catalog + catalog2:
-            if item.media_type == MediaType.MOVIE and item.provider_id not in seen_ids:
-                seen_ids.add(item.provider_id)
-                unique_movies.append(item)
+        unique_movies = await _load_catalog_from_db()
+        unique_movies.sort(key=lambda m: (m.media_id or "", m.title))
+        unique_movies = await _enrich_genres_from_db(unique_movies)
         genres_set: set[str] = set()
         for m in unique_movies:
             genres_set.update(m.genres or [])
@@ -208,15 +257,9 @@ async def xtream_player_api(
         except ValueError:
             return {}
 
-        catalog = await catalog_service.get_catalog("cuevana3")
-        catalog2 = await catalog_service.get_catalog("cuevan_net")
-        seen_vod_info_ids: set[str] = set()
-        dedup_catalog: list[MediaItem] = []
-        for item in catalog + catalog2:
-            if item.provider_id not in seen_vod_info_ids:
-                seen_vod_info_ids.add(item.provider_id)
-                dedup_catalog.append(item)
-        item = _stream_id_to_media(stream_id, "movie", dedup_catalog)
+        all_movies = await _load_catalog_from_db()
+        all_movies.sort(key=lambda m: (m.media_id or "", m.title))
+        item = _stream_id_to_media(stream_id, "movie", all_movies)
         if item is None:
             return {}
 

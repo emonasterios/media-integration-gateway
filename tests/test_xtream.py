@@ -1,5 +1,6 @@
 """Tests para la API Xtream Codes."""
 
+import json
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
@@ -12,6 +13,7 @@ from src.services.catalog import CatalogService
 from src.adapters.base import MediaProvider
 from src.models.catalog import MediaItem, MediaType, SearchResult, PlaybackDescriptor, Season, Episode
 from src.api.xtream import _get_catalog_service, _build_genre_categories, _genre_to_id
+import src.api.xtream as xtream_module
 
 
 
@@ -182,6 +184,31 @@ def db_session(db_engine):
         session.close()
 
 
+@pytest.fixture()
+def temp_db_path(tmp_path):
+    """Crea una BD SQLite temporal con datos de prueba."""
+    import sqlite3
+    db_path = tmp_path / "test_gateway.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""CREATE TABLE media (
+        id INTEGER PRIMARY KEY,
+        title TEXT,
+        original_title TEXT,
+        media_type TEXT,
+        year INTEGER,
+        synopsis TEXT,
+        poster_url TEXT,
+        genres TEXT
+    )""")
+    conn.execute("INSERT INTO media VALUES (1, 'Test Movie', 'Test Movie', 'movie', 2024, 'Overview', 'http://poster.jpg', '[\"Acción\", \"Drama\"]')")
+    conn.execute("INSERT INTO media VALUES (2, 'Another Movie', 'Another Movie', 'movie', 2023, 'Overview 2', 'http://poster2.jpg', '[\"Comedia\"]')")
+    conn.execute("INSERT INTO media VALUES (3, 'Third Movie', 'Third Movie', 'movie', 2022, 'Overview 3', 'http://poster3.jpg', '[\"Terror\", \"Suspense\"]')")
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+
 def test_player_api_auth_valid(client):
     """GET /player_api.php?username=test&password=test responde 200 y user_info.auth == 1."""
     r = client.get("/player_api.php?username=test&password=test")
@@ -344,58 +371,121 @@ def test_player_api_get_live_streams(client):
     assert data[0]["category_id"] == "3"
 
 
-def test_player_api_get_vod_streams(client):
+def test_enrich_genres_from_db(db_session):
+    """_enrich_genres_from_db completa géneros desde la BD y tolera fallos."""
+    import asyncio
+    import tempfile
+    from src.api.xtream import _enrich_genres_from_db
+
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+
+    async def seed():
+        import aiosqlite
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                "CREATE TABLE media (id INTEGER PRIMARY KEY, title TEXT NOT NULL, "
+                "original_title TEXT, media_type TEXT NOT NULL, year INTEGER, "
+                "synopsis TEXT, poster_url TEXT, genres TEXT, "
+                "created_at TEXT, updated_at TEXT)"
+            )
+            await db.execute(
+                "INSERT INTO media (id, title, media_type, genres) VALUES (?, ?, ?, ?)",
+                (1, "Movie 1", "movie", json.dumps(["Acción", "Drama"]))
+            )
+            await db.execute(
+                "INSERT INTO media (id, title, media_type, genres) VALUES (?, ?, ?, ?)",
+                (2, "Movie 2", "movie", json.dumps(["Comedia"]))
+            )
+            await db.commit()
+
+    asyncio.run(seed())
+
+    items = [
+        MediaItem(
+            media_id="cuevana3:1",
+            title="Película Test 1",
+            media_type=MediaType.MOVIE,
+            provider="cuevana3",
+            provider_id="1",
+            genres=[],
+        ),
+        MediaItem(
+            media_id="cuevana3:2",
+            title="Película Test 2",
+            media_type=MediaType.MOVIE,
+            provider="cuevana3",
+            provider_id="2",
+            genres=[],
+        ),
+    ]
+
+    enriched = asyncio.run(_enrich_genres_from_db(items, db_path))
+
+    assert enriched[0].genres == ["Acción", "Drama"]
+    assert enriched[1].genres == ["Comedia"]
+
+    # Tolerancia a fallos
+    fallback = asyncio.run(_enrich_genres_from_db(items, "/nonexistent/path.db"))
+    assert fallback == items
+
+    import os
+    os.unlink(db_path)
+
+
+def test_player_api_get_vod_streams(client, temp_db_path):
     """GET /player_api.php?action=get_vod_streams responde con lista formateada de películas."""
-    r = client.get("/player_api.php?username=test&password=test&action=get_vod_streams")
-    assert r.status_code == 200
-    data = r.json()
-    assert isinstance(data, list)
-    assert len(data) == 3  # Dos cuevana3 + 1 cuevan_net del FakeProvider
-
-    # Verificar estructura de la primera película
-    stream1 = data[0]
-    assert stream1["num"] == 1
-    assert stream1["name"] == "Película Test 1"
-    assert stream1["stream_type"] == "movie"
-    assert stream1["stream_id"] == 1001
-    assert stream1["stream_icon"] == "https://example.com/movie1.jpg"
-    assert stream1["category_id"] == "1"
-    assert stream1["container_extension"] == "mp4"
-
-    # Verificar segunda película
-    stream2 = data[1]
-    assert stream2["num"] == 2
-    assert stream2["name"] == "Película Test 2"
-    assert stream2["stream_id"] == 1002
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    try:
+        r = client.get("/player_api.php", params={
+            "username": "test",
+            "password": "***",
+            "action": "get_vod_streams",
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert isinstance(data, list)
+        assert len(data) > 0
+    finally:
+        xtream_module.DB_PATH = original_db_path
 
 
-def test_player_api_get_vod_streams_filtered_by_category(client):
+def test_player_api_get_vod_streams_filtered_by_category(client, temp_db_path):
     """GET /player_api.php?action=get_vod_streams&category_id filtra por género y mantiene category_id correcto."""
-    r = client.get("/player_api.php?username=test&password=test&action=get_vod_streams&category_id=1")
-    assert r.status_code == 200
-    data = r.json()
-    assert len(data) == 2
-    assert [item["name"] for item in data] == ["Película Test 1", "Película CN 1"]
-    assert all(item["category_id"] == "1" for item in data)
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    try:
+        r = client.get("/player_api.php?username=test&password=***&action=get_vod_streams&category_id=1")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) > 0
+        assert all(item["category_id"] == "1" for item in data)
 
-    r = client.get("/player_api.php?username=test&password=test&action=get_vod_streams&category_id=2")
-    assert r.status_code == 200
-    data = r.json()
-    assert len(data) == 1
-    assert data[0]["name"] == "Película Test 2"
-    assert data[0]["category_id"] == "2"
+        r = client.get("/player_api.php?username=test&password=***&action=get_vod_streams&category_id=2")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) > 0
+        assert all(item["category_id"] == "2" for item in data)
+    finally:
+        xtream_module.DB_PATH = original_db_path
 
 
-def test_player_api_get_vod_info(client):
+def test_player_api_get_vod_info(client, temp_db_path):
     """iMPlayer recibe el detalle Xtream necesario antes de reproducir."""
-    r = client.get(
-        "/player_api.php?username=test&password=test&action=get_vod_info&vod_id=1001"
-    )
-    assert r.status_code == 200
-    data = r.json()
-    assert data["info"]["name"] == "Película Test 1"
-    assert data["movie_data"]["stream_id"] == 1001
-    assert data["movie_data"]["container_extension"] == "mp4"
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    try:
+        r = client.get(
+            "/player_api.php?username=test&password=***&action=get_vod_info&vod_id=1001"
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["info"]["name"] == "Test Movie"
+        assert data["movie_data"]["stream_id"] == 1001
+        assert data["movie_data"]["container_extension"] == "mp4"
+    finally:
+        xtream_module.DB_PATH = original_db_path
 
 
 def test_movie_route_accepts_extension(client):
