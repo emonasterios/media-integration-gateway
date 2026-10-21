@@ -38,8 +38,8 @@ explícitos de sincronización.
 ## ACEPTACION
 
 ```bash
-python -m pytest tests/ -q
-python -m pytest tests/test_xtream.py tests/test_smoke.py -q
+.venv/bin/python -m pytest tests/ -q
+.venv/bin/python -m pytest tests/test_xtream.py tests/test_smoke.py -q
 ! rg -n 'catalog_service\.get_catalog\(' src/api/xtream.py
 ```
 
