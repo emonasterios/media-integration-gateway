@@ -225,6 +225,54 @@ async def test_get_catalog_movies(adapter):
 
 
 @pytest.mark.asyncio
+async def test_get_catalog_follows_next_until_it_disappears(adapter, monkeypatch):
+    """La paginación no tiene un máximo fijo y deduplica por provider_id."""
+    first = CATALOG_HTML.replace(
+        "</body>",
+        '<a class="next page-numbers" href="/peliculas/page/2/"></a></body>',
+    )
+    second = CATALOG_HTML
+    adapter._client.get.side_effect = [MockResponse(first), MockResponse(second)]
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("src.adapters.cuevana3.asyncio.sleep", no_sleep)
+    items = await adapter.get_catalog()
+
+    assert len(items) == 4
+    assert adapter._client.get.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_catalog_failure_after_first_page_is_explicit(adapter, monkeypatch):
+    """Un fallo intermedio no puede parecer un catálogo completo."""
+    from src.adapters.cuevana3 import CatalogCrawlError
+
+    first = CATALOG_HTML.replace(
+        "</body>",
+        '<a class="next page-numbers" href="/peliculas/page/2/"></a></body>',
+    )
+    calls = 0
+
+    async def first_then_timeout(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return MockResponse(first)
+        raise httpx.TimeoutException("Timeout")
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("src.adapters.cuevana3.asyncio.sleep", no_sleep)
+    adapter._client.get.side_effect = first_then_timeout
+    with pytest.raises(CatalogCrawlError, match="snapshot incompleto"):
+        await adapter.get_catalog()
+    assert adapter._client.get.await_count == 4
+
+
+@pytest.mark.asyncio
 async def test_get_catalog_with_category(adapter):
     """Validar get_catalog con categoría específica."""
     call_count = [0]
@@ -245,23 +293,25 @@ async def test_get_catalog_with_category(adapter):
 
 
 @pytest.mark.asyncio
-async def test_get_catalog_timeout_returns_empty(adapter):
-    """Simular timeout y verificar que devuelve lista vacía sin excepción."""
+async def test_get_catalog_timeout_is_explicit(adapter):
+    """Un timeout no se confunde con un catálogo vacío completo."""
+    from src.adapters.cuevana3 import CatalogCrawlError
+
     adapter._client.get.side_effect = httpx.TimeoutException("Timeout")
 
-    items = await adapter.get_catalog()
-
-    assert items == []
+    with pytest.raises(CatalogCrawlError, match="snapshot incompleto"):
+        await adapter.get_catalog()
 
 
 @pytest.mark.asyncio
-async def test_get_catalog_http_error_returns_empty(adapter):
-    """Simular error HTTP y verificar que devuelve lista vacía."""
+async def test_get_catalog_http_error_is_explicit(adapter):
+    """Un error HTTP no se confunde con un catálogo vacío completo."""
+    from src.adapters.cuevana3 import CatalogCrawlError
+
     adapter._client.get.side_effect = httpx.HTTPError("Connection error")
 
-    items = await adapter.get_catalog()
-
-    assert items == []
+    with pytest.raises(CatalogCrawlError, match="snapshot incompleto"):
+        await adapter.get_catalog()
 
 
 # ----------------------------------------------------------------------
@@ -484,9 +534,10 @@ async def test_timeout_handling_all_methods(adapter):
     """Test integral: simular fallo de timeout de httpx en todos los métodos públicos."""
     adapter._client.get.side_effect = httpx.TimeoutException("Timeout")
 
-    # get_catalog - captura timeout y devuelve lista vacía
-    catalog = await adapter.get_catalog()
-    assert catalog == []
+    # get_catalog - el fallo es explícito para impedir sincronizaciones destructivas
+    from src.adapters.cuevana3 import CatalogCrawlError
+    with pytest.raises(CatalogCrawlError, match="snapshot incompleto"):
+        await adapter.get_catalog()
 
     # search - captura timeout y devuelve resultado vacío
     search = await adapter.search("test")

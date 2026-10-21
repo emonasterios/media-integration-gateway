@@ -2,6 +2,7 @@
 
 import pytest
 import httpx
+from bs4 import BeautifulSoup
 from unittest.mock import AsyncMock, patch
 from pathlib import Path
 
@@ -46,8 +47,13 @@ def adapter():
 @pytest.mark.asyncio
 async def test_get_catalog_real_fixture(adapter):
     """Validar get_catalog con HTML real del catálogo (cuevana3_catalogo_peliculas.html)."""
+    # Esta prueba valida el parser de una sola página; la paginación completa se
+    # cubre por separado y necesita respuestas distintas para cada URL.
+    soup = BeautifulSoup(CATALOG_HTML, "lxml")
+    for link in soup.select("a.next.page-numbers"):
+        link.decompose()
     adapter._client.get.return_value = AsyncMock(
-        text=CATALOG_HTML,
+        text=str(soup),
         status_code=200,
         raise_for_status=lambda: None,
     )

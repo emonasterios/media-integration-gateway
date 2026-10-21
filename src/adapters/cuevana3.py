@@ -31,6 +31,10 @@ BASE_URL = "https://cuevana3i.cc"
 logger = logging.getLogger(__name__)
 
 
+class CatalogCrawlError(RuntimeError):
+    """El catálogo no pudo recorrerse completo y no es un snapshot fiable."""
+
+
 class Cuevana3Adapter(MediaProvider):
     """Adapter de lectura para cuevana3i.cc."""
 
@@ -132,31 +136,49 @@ class Cuevana3Adapter(MediaProvider):
         """Lista películas o series recientes con paginación completa."""
         path = "/peliculas/" if not category else f"/genero/{category}/"
         all_items: list[MediaItem] = []
+        seen_provider_ids: set[str] = set()
+        visited_pages: set[str] = set()
         page = 1
-        max_pages = 20  # límite razonable (~1,500 items)
+        page_path = path
 
-        while page <= max_pages:
-            page_path = path
-            if page > 1:
-                # Cuevana3 usa /peliculas/page/N/
-                base = path.rstrip("/")
-                page_path = f"{base}/page/{page}/"
+        while page_path:
+            absolute_page = urljoin(f"{self._base}/", page_path)
+            if absolute_page in visited_pages:
+                raise CatalogCrawlError(
+                    f"Paginación cíclica detectada en página {page}: {absolute_page}"
+                )
+            visited_pages.add(absolute_page)
 
-            try:
-                resp = await self._client.get(page_path)
-                resp.raise_for_status()
-            except httpx.TimeoutException:
-                logger.warning("Timeout en catálogo página %d: %s", page, page_path)
-                break
-            except httpx.HTTPError as e:
-                logger.warning("Error HTTP en catálogo página %d: %s", page, e)
-                break
+            last_error: httpx.HTTPError | None = None
+            for attempt in range(1, 4):
+                try:
+                    resp = await self._client.get(page_path)
+                    resp.raise_for_status()
+                    last_error = None
+                    break
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Fallo en catálogo página %d (intento %d/3): %s",
+                        page,
+                        attempt,
+                        exc,
+                    )
+                    if attempt < 3:
+                        await asyncio.sleep(attempt * 2)
+
+            if last_error is not None:
+                raise CatalogCrawlError(
+                    f"Error en página {page} tras 3 intentos; snapshot incompleto: "
+                    f"{last_error}"
+                ) from last_error
 
             soup = BeautifulSoup(resp.text, "lxml")
             posts = soup.select("div.TPost")
             if not posts:
-                logger.debug("No hay más posts en página %d, fin de paginación", page)
-                break
+                raise CatalogCrawlError(
+                    f"Página {page} no contiene elementos; snapshot incompleto"
+                )
 
             for post in posts:
                 link = post.find("a", href=True)
@@ -181,6 +203,9 @@ class Cuevana3Adapter(MediaProvider):
                         poster_url = urljoin(self._base, src) if not src.startswith("http") else src
 
                 provider_id = self._slug_from_url(link["href"])
+                if not provider_id or provider_id in seen_provider_ids:
+                    continue
+                seen_provider_ids.add(provider_id)
                 media_type = MediaType.SERIES if "/serie/" in link["href"] else MediaType.MOVIE
 
                 all_items.append(
@@ -199,12 +224,16 @@ class Cuevana3Adapter(MediaProvider):
 
             logger.info("Página %d: %d items (total acumulado: %d)", page, len(posts), len(all_items))
 
+            next_link = soup.select_one("a.next.page-numbers[href]")
+            if next_link is None:
+                page_path = None
+                continue
+            page_path = next_link["href"]
+            page += 1
             # Delay entre páginas para no ser baneado
             await asyncio.sleep(1)
 
-            page += 1
-
-        logger.info("Catálogo completo: %d items en %d páginas", len(all_items), page - 1)
+        logger.info("Catálogo completo: %d items en %d páginas", len(all_items), page)
         return all_items
 
     # ------------------------------------------------------------------
