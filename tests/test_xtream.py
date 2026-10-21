@@ -482,6 +482,24 @@ def test_player_api_get_vod_streams_filtered_by_category(client, temp_db_path):
         xtream_module.DB_PATH = original_db_path
 
 
+def test_filtered_vod_uses_requested_secondary_genre_as_category_id(client, temp_db_path):
+    """Una película multigénero no debe desaparecer de sus géneros secundarios en iMPlayer."""
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    try:
+        # La película de prueba tiene Acción como primer género y Drama como
+        # segundo; Drama es category_id=3 en el catálogo de prueba.
+        response = client.get(
+            "/player_api.php?username=test&password=test&action=get_vod_streams&category_id=3"
+        )
+        assert response.status_code == 200
+        items = response.json()
+        assert items
+        assert all(item["category_id"] == "3" for item in items)
+    finally:
+        xtream_module.DB_PATH = original_db_path
+
+
 def test_player_api_get_vod_info(client, temp_db_path):
     """iMPlayer recibe el detalle Xtream necesario antes de reproducir."""
     original_db_path = xtream_module.DB_PATH

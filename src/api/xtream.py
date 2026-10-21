@@ -117,7 +117,12 @@ async def _enrich_genres_from_db(items: list[MediaItem], db_path: Path | str | N
     return items
 
 
-def _media_item_to_vod_stream(item: MediaItem, index: int, sorted_genres: list[str] | None = None) -> dict:
+def _media_item_to_vod_stream(
+    item: MediaItem,
+    index: int,
+    sorted_genres: list[str] | None = None,
+    category_id: str | None = None,
+) -> dict:
     """Convierte MediaItem a dict de stream VOD Xtream Codes."""
     stream_id = _movie_stream_id(item, index)
     return {
@@ -129,7 +134,11 @@ def _media_item_to_vod_stream(item: MediaItem, index: int, sorted_genres: list[s
         "rating": "0",
         "rating_5based": 0.0,
         "added": str(int(item.year * 31536000)) if item.year else "",
-        "category_id": _genre_to_id(item.genres, sorted_genres or []),
+        # Xtream only admits one category_id per row.  For a category-filtered
+        # request it must match the requested category, even when that genre is
+        # not the movie's first genre; otherwise clients such as iMPlayer drop
+        # the otherwise valid row from that category.
+        "category_id": category_id or _genre_to_id(item.genres, sorted_genres or []),
         "container_extension": "mp4",
         "custom_sid": "",
         "direct_source": "",
@@ -262,7 +271,10 @@ async def xtream_player_api(
                 return []
             target_genre = sorted_genres[idx - 1]
             unique_movies = [m for m in unique_movies if m.genres and target_genre in m.genres]
-        return [_media_item_to_vod_stream(item, idx, sorted_genres) for idx, item in enumerate(unique_movies, 1)]
+        return [
+            _media_item_to_vod_stream(item, idx, sorted_genres, category_id=category_id)
+            for idx, item in enumerate(unique_movies, 1)
+        ]
 
     if action == "get_vod_info":
         vod_id = request.query_params.get("vod_id", "")
