@@ -33,6 +33,7 @@ from src.services.catalog_checkpoint import (
 )
 from src.services.flaresolverr import FlareSolverrClient
 from src.services.video_resolver import VideoResolver
+from src.services.mediaflow_bridge import resolve_with_mediaflow
 
 BASE_URL = "https://cuevana3i.cc"
 
@@ -604,6 +605,27 @@ class Cuevana3Adapter(MediaProvider):
     # Resolución de reproducción
     # ------------------------------------------------------------------
     async def _build_playback_descriptor(self, server_url: str) -> Optional[PlaybackDescriptor]:
+        # Intentar primero con mediaflow-proxy extractors (FileLions, StreamWish, DoodStream, Voe, etc.)
+        from urllib.parse import urlparse
+        parsed = urlparse(server_url)
+        domain = parsed.hostname or ""
+        # Normalizar: quitar subdominios para matching
+        parts = domain.split(".")
+        if len(parts) > 2:
+            base_domain = ".".join(parts[-2:])
+        else:
+            base_domain = domain
+
+        # Intentar con mediaflow_bridge usando el dominio completo y el base
+        for candidate in [domain, base_domain]:
+            try:
+                mf_result = await resolve_with_mediaflow(server_url, candidate)
+                if mf_result:
+                    return mf_result
+            except Exception as e:
+                logger.debug("mediaflow_bridge falló para %s: %s", candidate, e)
+
+        # Fallback a resolvers custom
         if VideoResolver.is_doodstream(server_url):
             try:
                 direct = await self._video_resolver.resolve_doodstream(server_url)
