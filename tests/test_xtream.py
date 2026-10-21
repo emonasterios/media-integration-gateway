@@ -211,9 +211,11 @@ def temp_db_path(tmp_path):
     conn.execute("INSERT INTO media VALUES (1, 'Test Movie', 'Test Movie', 'movie', 2024, 'Overview', 'http://poster.jpg', '[\"Acción\", \"Drama\"]')")
     conn.execute("INSERT INTO media VALUES (2, 'Another Movie', 'Another Movie', 'movie', 2023, 'Overview 2', 'http://poster2.jpg', '[\"Comedia\"]')")
     conn.execute("INSERT INTO media VALUES (3, 'Third Movie', 'Third Movie', 'movie', 2022, 'Overview 3', 'http://poster3.jpg', '[\"Terror\", \"Suspense\"]')")
+    conn.execute("INSERT INTO media VALUES (4, 'Database Series', 'Database Series', 'series', 2021, 'Stored overview', 'http://series-poster.jpg', '[\"Drama\"]')")
     conn.execute("INSERT INTO sources VALUES (1, 1, 'cuevana3', 'test-movie', 'auto', 'es')")
     conn.execute("INSERT INTO sources VALUES (2, 2, 'cuevana3', 'another-movie', 'auto', 'es')")
     conn.execute("INSERT INTO sources VALUES (3, 3, 'cuevana3', 'third-movie', 'auto', 'es')")
+    conn.execute("INSERT INTO sources VALUES (4, 4, 'cuevana3', 'database-series', 'auto', 'es')")
     conn.commit()
     conn.close()
     return db_path
@@ -529,22 +531,27 @@ def test_movie_route_accepts_extension(client, temp_db_path):
         xtream_module.DB_PATH = original_db_path
 
 
-def test_player_api_get_series(client):
-    """GET /player_api.php?action=get_series responde con lista formateada de series."""
-    r = client.get("/player_api.php?username=test&password=test&action=get_series")
-    assert r.status_code == 200
-    data = r.json()
-    assert isinstance(data, list)
-    assert len(data) == 1  # Una serie del FakeProvider
+def test_player_api_get_series_reads_database(client, temp_db_path):
+    """get_series usa el snapshot SQLite y no dispara un rastreo del proveedor."""
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    try:
+        r = client.get("/player_api.php?username=test&password=test&action=get_series")
+        assert r.status_code == 200
+        data = r.json()
+        assert isinstance(data, list)
+        assert len(data) == 1
 
-    series = data[0]
-    assert series["num"] == 1
-    assert series["name"] == "Serie Test 1"
-    assert series["series_id"] == 2001
-    assert series["cover"] == "https://example.com/series1.jpg"
-    assert series["plot"] == "Descripción serie 1"
-    assert series["category_id"] == "2"
-    assert series["releaseDate"] == "2022-01-01"
+        series = data[0]
+        assert series["num"] == 1
+        assert series["name"] == "Database Series"
+        assert series["series_id"] == 2001
+        assert series["cover"] == "http://series-poster.jpg"
+        assert series["plot"] == "Stored overview"
+        assert series["category_id"] == "2"
+        assert series["releaseDate"] == "2021-01-01"
+    finally:
+        xtream_module.DB_PATH = original_db_path
 
 
 def test_panel_api(client):

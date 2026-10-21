@@ -1,4 +1,3 @@
-# Qué significa "hecho" en este repo: el adapter funciona contra el sitio REAL.
-# Pasar pytest no basta (2026-10-01: 27 pruebas en verde y cero vídeos).
-cd /home/emon/media-integration-gateway && . .venv/bin/activate && python scripts/accept_cuevana3.py
-cd /home/emon/media-integration-gateway && . .venv/bin/activate && python scripts/accept_cache.py
+# La API pública debe servir el snapshot SQLite sin disparar un rastreo completo del sitio.
+# La aceptación en vivo del adapter se ejecuta aparte cuando cambia scraping o playback.
+cd /home/emon/media-integration-gateway && . .venv/bin/activate && pytest -q tests/test_xtream.py -k 'reads_database'

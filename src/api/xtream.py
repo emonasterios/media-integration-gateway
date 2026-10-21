@@ -19,8 +19,11 @@ DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "gateway.db"
 MOVIE_STREAM_ID_BASE = 100_000
 
 
-async def _load_catalog_from_db(db_path: Path | str | None = None) -> list[MediaItem]:
-    """Carga el catálogo VOD desde SQLite. db_path permite tests con BD en memoria."""
+async def _load_catalog_from_db(
+    db_path: Path | str | None = None,
+    media_type: MediaType = MediaType.MOVIE,
+) -> list[MediaItem]:
+    """Carga una sección del catálogo desde SQLite. db_path permite tests aislados."""
     target = Path(db_path) if db_path else DB_PATH
     if not target.exists():
         return []
@@ -30,8 +33,9 @@ async def _load_catalog_from_db(db_path: Path | str | None = None) -> list[Media
             "s.url as source_url "
             "FROM media m "
             "LEFT JOIN sources s ON s.media_id = m.id AND s.provider = 'cuevana3' "
-            "WHERE m.media_type = 'movie' "
-            "ORDER BY m.title"
+            "WHERE m.media_type = ? "
+            "ORDER BY m.id",
+            (media_type.value,),
         ) as cur:
             rows = await cur.fetchall()
     return [
@@ -41,7 +45,7 @@ async def _load_catalog_from_db(db_path: Path | str | None = None) -> list[Media
             provider_id=row[8] or str(row[0]),  # url de sources, fallback a id
             title=row[1],
             original_title=row[2],
-            media_type=MediaType.MOVIE,
+            media_type=media_type,
             year=row[4],
             overview=row[5],
             poster_url=row[6],
@@ -307,14 +311,7 @@ async def xtream_player_api(
         }
 
     if action == "get_series":
-        catalog = await catalog_service.get_catalog("cuevana3")
-        catalog2 = await catalog_service.get_catalog("cuevan_net")
-        seen_series_ids: set[str] = set()
-        series: list[MediaItem] = []
-        for item in catalog + catalog2:
-            if item.media_type == MediaType.SERIES and item.provider_id not in seen_series_ids:
-                seen_series_ids.add(item.provider_id)
-                series.append(item)
+        series = await _load_catalog_from_db(media_type=MediaType.SERIES)
         return [_media_item_to_series_stream(item, idx) for idx, item in enumerate(series, 1)]
 
     if action == "get_live_streams":
