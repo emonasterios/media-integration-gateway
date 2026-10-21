@@ -488,12 +488,12 @@ def test_player_api_get_vod_info(client, temp_db_path):
     xtream_module.DB_PATH = temp_db_path
     try:
         r = client.get(
-            "/player_api.php?username=test&password=***&action=get_vod_info&vod_id=1001"
+            "/player_api.php?username=test&password=***&action=get_vod_info&vod_id=100001"
         )
         assert r.status_code == 200
         data = r.json()
         assert data["info"]["name"] == "Test Movie"
-        assert data["movie_data"]["stream_id"] == 1000 + 1
+        assert data["movie_data"]["stream_id"] == 100000 + 1
         assert data["movie_data"]["container_extension"] == "mp4"
     finally:
         xtream_module.DB_PATH = original_db_path
@@ -504,7 +504,7 @@ def test_movie_route_accepts_extension(client, temp_db_path):
     original_db_path = xtream_module.DB_PATH
     xtream_module.DB_PATH = temp_db_path
     try:
-        r = client.get("/movie/test/test/1001.mp4", follow_redirects=False)
+        r = client.get("/movie/test/test/100001.mp4", follow_redirects=False)
         assert r.status_code == 200
         assert "video/mp4" in r.headers["content-type"]
     finally:
@@ -572,7 +572,7 @@ def test_vod_stream_conversion():
     assert result["num"] == 5
     assert result["name"] == "Test Movie"
     assert result["stream_type"] == "movie"
-    assert result["stream_id"] == 1000 + 5
+    assert result["stream_id"] == 100000 + 5
     assert result["stream_icon"] == "https://example.com/test.jpg"
     assert result["rating"] == "0"
     assert result["rating_5based"] == 0.0
@@ -631,7 +631,7 @@ def test_stream_id_stable_under_reordering(client, temp_db_path):
         reordered = list(reversed(baseline))
         assert {item["stream_id"]: item for item in reordered} == {item["stream_id"]: item for item in baseline}
 
-        stream_id = 1001
+        stream_id = 100001
         info = client.get(
             "/player_api.php",
             params={
@@ -687,16 +687,16 @@ def test_movie_stream_id_matches_catalog_info_and_playback(client, temp_db_path)
             "password": "***",
             "action": "get_vod_streams",
         }).json()
-        target = next(item for item in catalog if item["stream_id"] == 1001)
+        target = next(item for item in catalog if item["stream_id"] == 100001)
         info = client.get("/player_api.php", params={
             "username": "test",
             "password": "***",
             "action": "get_vod_info",
-            "vod_id": "1001",
+            "vod_id": "100001",
         }).json()
         assert info["movie_data"]["stream_id"] == target["stream_id"]
         assert info["info"]["name"] == target["name"]
-        movie = client.get("/movie/test/test/1001.mp4", follow_redirects=False)
+        movie = client.get("/movie/test/test/100001.mp4", follow_redirects=False)
         assert movie.status_code == 200
         assert "video/mp4" in movie.headers["content-type"]
     finally:

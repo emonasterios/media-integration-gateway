@@ -16,6 +16,7 @@ from src.models.catalog import MediaItem, MediaType
 from src.services.catalog import CatalogService
 
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "gateway.db"
+MOVIE_STREAM_ID_BASE = 100_000
 
 
 async def _load_catalog_from_db(db_path: Path | str | None = None) -> list[MediaItem]:
@@ -68,11 +69,11 @@ def _genre_to_id(genres: list[str], sorted_genres: list[str]) -> str:
 
 
 def _movie_stream_id(movie: MediaItem, fallback_index: int = 1) -> int:
-    """Calcula stream_id estable (1000 + media.id) o usa fallback si media_id no es entero."""
+    """Calcula un stream_id estable en un rango separado de los IDs VOD heredados."""
     try:
-        return 1000 + int(movie.media_id)
+        return MOVIE_STREAM_ID_BASE + int(movie.media_id)
     except (ValueError, TypeError):
-        return 1000 + fallback_index
+        return MOVIE_STREAM_ID_BASE + fallback_index
 
 
 def _build_genre_categories(genres_or_items: list | set | None = None) -> list[dict]:
@@ -290,7 +291,7 @@ async def xtream_player_api(
                 "country": item.country or "",
                 "genre": ", ".join(item.genres),
             },
-            "movie_data": _media_item_to_vod_stream(item, stream_id - 1000),
+            "movie_data": _media_item_to_vod_stream(item, stream_id - MOVIE_STREAM_ID_BASE),
         }
 
     if action == "get_series":
@@ -391,15 +392,15 @@ logger = logging.getLogger(__name__)
 
 
 def movie_stream_id(media_id: int) -> int:
-    return 1000 + media_id
+    return MOVIE_STREAM_ID_BASE + media_id
 
 
 def media_id_from_stream_id(stream_id: int) -> int:
-    return stream_id - 1000
+    return stream_id - MOVIE_STREAM_ID_BASE
 
 
 def find_movie_by_stream_id(items: list[MediaItem], stream_id: int) -> MediaItem | None:
-    if stream_id <= 1000:
+    if stream_id <= MOVIE_STREAM_ID_BASE:
         return None
     for idx, movie in enumerate(items, start=1):
         if _movie_stream_id(movie, idx) == stream_id:
