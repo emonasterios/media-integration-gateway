@@ -7,6 +7,8 @@ from typing import Optional
 
 from mediaflow_proxy.extractors.doodstream import DoodStreamExtractor
 from mediaflow_proxy.extractors.voe import VoeExtractor
+from mediaflow_proxy.extractors.filelions import FileLionsExtractor
+from mediaflow_proxy.extractors.streamwish import StreamWishExtractor
 from mediaflow_proxy.extractors.base import ExtractorError
 
 from src.models.catalog import PlaybackDescriptor
@@ -27,6 +29,13 @@ _EXTRACTOR_MAP = {
     "voeunblock.com": VoeExtractor,
     "voeunbl0ck.com": VoeExtractor,
     "voeunblocker.com": VoeExtractor,
+    "filelions.to": FileLionsExtractor,
+    "filelions.com": FileLionsExtractor,
+    "vidhide.com": FileLionsExtractor,
+    "vidhidepro.com": FileLionsExtractor,
+    "streamwish.to": StreamWishExtractor,
+    "streamwish.com": StreamWishExtractor,
+    "ajmidyad.sbs": StreamWishExtractor,
 }
 
 _DOOD_UA = (
