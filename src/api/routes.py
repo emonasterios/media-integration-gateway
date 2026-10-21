@@ -33,8 +33,12 @@ async def search(
     provider: Optional[str] = None,
     catalog: CatalogService = Depends(_get_catalog),
 ):
-    """Buscar contenido en uno o todos los proveedores."""
-    return await catalog.search(q, provider)
+    """Buscar contenido en el snapshot local (BD). Sin rastreo de red."""
+    try:
+        return await catalog.search(q, provider)
+    except Exception:
+        # Cualquier error: devolver lista vacía (200). Garantiza desacople de red.
+        return []
 
 
 # -------------------------------------------------------------------
@@ -46,11 +50,14 @@ async def get_catalog(
     category: Optional[str] = None,
     catalog: CatalogService = Depends(_get_catalog),
 ):
-    """Listar catálogo de un proveedor."""
+    """Listar catálogo de un proveedor desde snapshot local (BD). Sin rastreo de red."""
     try:
         return await catalog.get_catalog(provider, category)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception:
+        # Cualquier otro error (BD, etc.): lista vacía 200, no reventar.
+        return []
 
 
 # -------------------------------------------------------------------

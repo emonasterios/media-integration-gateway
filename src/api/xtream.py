@@ -341,14 +341,9 @@ async def xtream_player_api(
         query = request.query_params.get("query", "")
         if not query:
             return []
-        search_results = await catalog_service.search(query)
-        seen_search_ids: set[str] = set()
-        movies: list[MediaItem] = []
-        for sr in search_results:
-            for item in sr.items:
-                if item.media_type == MediaType.MOVIE and item.provider_id not in seen_search_ids:
-                    seen_search_ids.add(item.provider_id)
-                    movies.append(item)
+        items = await _load_catalog_from_db(media_type=MediaType.MOVIE)
+        query_lower = query.lower()
+        movies = [item for item in items if query_lower in item.title.lower()]
         sorted_genres = sorted({genre for item in movies for genre in (item.genres or [])})
         return [_media_item_to_vod_stream(item, idx, sorted_genres) for idx, item in enumerate(movies, 1)]
 
@@ -356,8 +351,9 @@ async def xtream_player_api(
         query = request.query_params.get("query", "")
         if not query:
             return []
-        search_results = await catalog_service.search(query)
-        series = [item for sr in search_results for item in sr.items if item.media_type == MediaType.SERIES]
+        items = await _load_catalog_from_db(media_type=MediaType.SERIES)
+        query_lower = query.lower()
+        series = [item for item in items if query_lower in item.title.lower()]
         return [_media_item_to_series_stream(item, idx) for idx, item in enumerate(series, 1)]
 
     # Sin action -> devolver cuenta completa
@@ -375,10 +371,18 @@ async def xtream_panel_api(
     if not username or not password:
         return {"user_info": {"auth": 0}, "server_info": {}}
 
-    catalog = await catalog_service.get_catalog("cuevana3")
-    catalog2 = await catalog_service.get_catalog("cuevan_net")
-    movies = [item for item in catalog + catalog2 if item.media_type == MediaType.MOVIE]
-    series = [item for item in catalog + catalog2 if item.media_type == MediaType.SERIES]
+    movies = await _load_catalog_from_db(media_type=MediaType.MOVIE)
+    series = await _load_catalog_from_db(media_type=MediaType.SERIES)
+    if not movies and not series:
+        # Fallback: leer del caché en memoria de catalog_service (sin red)
+        cache = getattr(catalog_service, "_catalog_cache", {})
+        for value in cache.values():
+            cached_items = value[1] if isinstance(value, tuple) else value
+            for item in cached_items:
+                if getattr(item, "media_type", None) == MediaType.MOVIE:
+                    movies.append(item)
+                elif getattr(item, "media_type", None) == MediaType.SERIES:
+                    series.append(item)
 
     return {
         "panel_info": {
@@ -520,9 +524,8 @@ async def stream_series(
     catalog_service: CatalogService = Depends(_get_catalog_service),
 ):
     """Reproduce un episodio de serie. Redirige al URL de playback real."""
-    catalog = await catalog_service.get_catalog("cuevana3")
-    catalog2 = await catalog_service.get_catalog("cuevan_net")
-    media = _stream_id_to_media(stream_id, "series", catalog + catalog2)
+    series_catalog = await _load_catalog_from_db(media_type=MediaType.SERIES)
+    media = _stream_id_to_media(stream_id, "series", series_catalog)
     if not media:
         return {"error": "stream not found", "stream_id": stream_id}
 

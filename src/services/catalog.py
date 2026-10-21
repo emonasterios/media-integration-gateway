@@ -18,11 +18,18 @@ from src.models.catalog import (
 # Import condicional para evitar dependencia dura si no se usa cache
 try:
     from src.db.database import AsyncSessionLocal
+    from src.db.models import Media, Source
     from src.services.cache import CatalogCache
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
     _HAS_CACHE = True
 except ImportError:
     CatalogCache = None  # type: ignore
     AsyncSessionLocal = None  # type: ignore
+    Media = None  # type: ignore
+    Source = None  # type: ignore
+    select = None  # type: ignore
+    selectinload = None  # type: ignore
     _HAS_CACHE = False
 
 
@@ -40,6 +47,7 @@ class CatalogService:
         self._catalog_ttl_seconds = catalog_ttl_seconds
         self._catalog_cache: dict[tuple[str, str | None], tuple[float, list[MediaItem]]] = {}
         self._catalog_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
+        self._db_read_lock = asyncio.Lock()
 
     @property
     def provider_names(self) -> list[str]:
@@ -128,8 +136,37 @@ class CatalogService:
         
         await self._cache.save_media(item_data, sources_data)
 
+    async def _load_catalog_from_db(self, provider: str) -> list[MediaItem]:
+        """Lee el snapshot local (SQLite) del proveedor vía sesión de BD. Sin red."""
+        if not _HAS_CACHE or self._cache is None:
+            return []
+        stmt = (
+            select(Media)
+            .options(selectinload(Media.sources))
+            .join(Source, Source.media_id == Media.id)
+            .where(Source.provider == provider)
+            .order_by(Media.id)
+        )
+        async with self._db_read_lock:
+            try:
+                result = await self._cache.db.execute(stmt)
+                rows = result.scalars().all()
+            except Exception:
+                # BD ausente o sin tablas: snapshot vacío, sin rastreo de red.
+                return []
+        items: list[MediaItem] = []
+        seen: set[int] = set()
+        for media in rows:
+            if media.id in seen:
+                continue
+            seen.add(media.id)
+            item = self._convert_db_media_to_item(media, provider)
+            if item is not None:
+                items.append(item)
+        return items
+
     async def search(self, query: str, provider: str | None = None) -> list[SearchResult]:
-        """Buscar en el catálogo cacheado (filtrado local por título)."""
+        """Buscar en el snapshot local (BD/memoria), filtrado por título. Sin red."""
         query_lower = query.lower().strip()
         if not query_lower:
             return []
@@ -149,11 +186,8 @@ class CatalogService:
                 if matched:
                     results.append(SearchResult(items=matched, total=len(matched), query=query))
             except Exception:
-                # Proveedor caído: intentar search del adapter como fallback
-                try:
-                    results.append(await p.search(query))
-                except Exception:
-                    pass
+                # Sin red: proveedor caído o desconocido no aporta resultados.
+                continue
         return results
 
     async def get_details(self, provider: str, media_id: str) -> MediaItem:
@@ -184,6 +218,9 @@ class CatalogService:
     async def get_catalog(
         self, provider: str, category: str | None = None, _allow_stale: bool = False
     ) -> list[MediaItem]:
+        # Validar proveedor primero (lanza KeyError si no existe)
+        self.get_provider(provider)
+        
         key = (provider, category)
         now = time.monotonic()
         cached = self._catalog_cache.get(key)
@@ -200,6 +237,14 @@ class CatalogService:
                 return cached[1]
             if _allow_stale and cached is not None:
                 return cached[1]
-            catalog = await self.get_provider(provider).get_catalog(category)
+            if self._cache is not None:
+                # Con BD configurada: leer exclusivamente el snapshot SQLite local.
+                catalog = await self._load_catalog_from_db(provider)
+            else:
+                # Sin BD configurada (doubles de prueba con catálogo en memoria):
+                # invocar adapter UNA VEZ para poblar la caché en memoria.
+                # En producción siempre hay BD; esto evita rastreo de red real.
+                provider_obj = self.get_provider(provider)
+                catalog = await provider_obj.get_catalog(category)
             self._catalog_cache[key] = (time.monotonic(), catalog)
             return catalog

@@ -751,5 +751,237 @@ def test_vod_stream_id_inexistente_is_controlled(client, temp_db_path):
         xtream_module.DB_PATH = original_db_path
 
 
+# ============================================================
+# PASO 4: Pruebas de regresión - desacople de red en lecturas públicas
+# ============================================================
+
+
+class NetworkFailProvider(MediaProvider):
+    """Proveedor que FALLA si se llama get_catalog() (simula red)."""
+
+    def __init__(self, name: str):
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def search(self, query: str) -> SearchResult:
+        return SearchResult(items=[], total=0, query=query)
+
+    async def get_details(self, media_id: str) -> MediaItem:
+        return MediaItem(
+            media_id=f"{self._name}:{media_id}",
+            title="Test",
+            media_type=MediaType.MOVIE,
+            provider=self._name,
+            provider_id=media_id,
+        )
+
+    async def get_seasons(self, media_id: str) -> list[Season]:
+        return []
+
+    async def get_episodes(self, media_id: str, season_number: int) -> list[Episode]:
+        return []
+
+    async def resolve_playback(self, media_id: str) -> PlaybackDescriptor:
+        return PlaybackDescriptor(protocol="mp4", url="https://example.com/video.mp4")
+
+    async def get_catalog(self, category: str | None = None) -> list[MediaItem]:
+        # ESTO DEBE FALLAR - si se llama, significa que hay fuga a red
+        raise RuntimeError(
+            f"REGRESSION: {self._name}.get_catalog() llamado - ¡fuga a red detectada!"
+        )
+
+
+@pytest.fixture()
+def app_with_db_no_network(db_engine):
+    """App con proveedor que falla si get_catalog() es llamado.
+    
+    Los tests que usan este fixture verifican que las lecturas públicas
+    (search_vod, search_series, panel_api, get_series) NO llaman a
+    provider.get_catalog(), sino que leen exclusivamente del snapshot SQLite.
+    """
+    svc = CatalogService(providers=[NetworkFailProvider("cuevana3")])
+
+    TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=db_engine)
+
+    def override_get_db():
+        session = TestingSessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app = create_app(override_catalog=svc)
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[_get_catalog_service] = lambda: svc
+    return app
+
+
+@pytest.fixture()
+def client_no_network(app_with_db_no_network, temp_db_path):
+    """TestClient con BD temporal y proveedor que falla en get_catalog()."""
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    with TestClient(app_with_db_no_network) as c:
+        yield c
+    xtream_module.DB_PATH = original_db_path
+
+
+@pytest.fixture()
+def custom_temp_db_path(tmp_path):
+    """Crea una BD SQLite temporal con datos específicos para tests de regresión."""
+    import sqlite3
+    db_path = tmp_path / "test_gateway.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""CREATE TABLE media (
+        id INTEGER PRIMARY KEY,
+        title TEXT,
+        original_title TEXT,
+        media_type TEXT,
+        year INTEGER,
+        synopsis TEXT,
+        poster_url TEXT,
+        genres TEXT
+    )""")
+    conn.execute("""CREATE TABLE sources (
+        id INTEGER PRIMARY KEY,
+        media_id INTEGER,
+        provider TEXT,
+        url TEXT,
+        quality TEXT,
+        language TEXT
+    )""")
+    conn.execute("INSERT INTO media VALUES (1, 'Matrix', 'The Matrix', 'movie', 1999, 'Sci-fi classic', 'http://poster.jpg', '[\"Acción\", \"Ciencia Ficción\"]')")
+    conn.execute("INSERT INTO media VALUES (2, 'Inception', 'Inception', 'movie', 2010, 'Dream heist', 'http://poster2.jpg', '[\"Ciencia Ficción\", \"Thriller\"]')")
+    conn.execute("INSERT INTO media VALUES (3, 'Breaking Bad', 'Breaking Bad', 'series', 2008, 'Chemistry teacher', 'http://series.jpg', '[\"Drama\", \"Crimen\"]')")
+    conn.execute("INSERT INTO sources VALUES (1, 1, 'cuevana3', 'matrix', 'auto', 'es')")
+    conn.execute("INSERT INTO sources VALUES (2, 2, 'cuevana3', 'inception', 'auto', 'es')")
+    conn.execute("INSERT INTO sources VALUES (3, 3, 'cuevana3', 'breaking-bad', 'auto', 'es')")
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+@pytest.fixture()
+def client_no_network(app_with_db_no_network, custom_temp_db_path):
+    """TestClient con BD temporal y proveedor que falla en get_catalog()."""
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = custom_temp_db_path
+    with TestClient(app_with_db_no_network) as c:
+        yield c
+    xtream_module.DB_PATH = original_db_path
+
+
+class TestNoNetworkRegression:
+    """Tests que fallarían si hay llamadas a provider.get_catalog() (red)."""
+
+    def test_search_vod_uses_db_not_provider(self, client_no_network, custom_temp_db_path):
+        """search_vod debe leer de SQLite, NO llamar a provider.get_catalog()."""
+        # Si get_catalog() se llama, NetworkFailProvider lanza RuntimeError
+        r = client_no_network.get(
+            "/player_api.php",
+            params={
+                "username": "test",
+                "password": "test",
+                "action": "search_vod",
+                "query": "Matrix",
+            },
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["name"] == "Matrix"
+
+    def test_search_series_uses_db_not_provider(self, client_no_network, custom_temp_db_path):
+        """search_series debe leer de SQLite, NO llamar a provider.get_catalog()."""
+        r = client_no_network.get(
+            "/player_api.php",
+            params={
+                "username": "test",
+                "password": "test",
+                "action": "search_series",
+                "query": "Breaking",
+            },
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["name"] == "Breaking Bad"
+
+    def test_get_series_uses_db_not_provider(self, client_no_network, custom_temp_db_path):
+        """get_series debe leer de SQLite, NO llamar a provider.get_catalog()."""
+        r = client_no_network.get(
+            "/player_api.php",
+            params={
+                "username": "test",
+                "password": "test",
+                "action": "get_series",
+            },
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert isinstance(data, list)
+        assert len(data) == 1
+        assert data[0]["name"] == "Breaking Bad"
+
+    def test_panel_api_uses_db_not_provider(self, client_no_network, custom_temp_db_path):
+        """panel_api.php debe leer de SQLite, NO llamar a provider.get_catalog()."""
+        r = client_no_network.get(
+            "/panel_api.php?username=test&password=test"
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert "panel_info" in data
+        panel = data["panel_info"]
+        # 2 películas + 1 serie de la BD sembrada
+        assert panel["vod_streams"] == 2
+        assert panel["series_streams"] == 1
+
+    def test_get_vod_streams_uses_db_not_provider(self, client_no_network, custom_temp_db_path):
+        """get_vod_streams debe leer de SQLite, NO llamar a provider.get_catalog()."""
+        r = client_no_network.get(
+            "/player_api.php",
+            params={
+                "username": "test",
+                "password": "test",
+                "action": "get_vod_streams",
+            },
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert isinstance(data, list)
+        assert len(data) == 2
+        names = {item["name"] for item in data}
+        assert "Matrix" in names
+        assert "Inception" in names
+
+    def test_get_vod_info_uses_db_not_provider(self, client_no_network, custom_temp_db_path):
+        """get_vod_info debe leer de SQLite, NO llamar a provider.get_catalog()."""
+        # Primero obtener stream_id de Matrix
+        catalog = client_no_network.get(
+            "/player_api.php",
+            params={"username": "test", "password": "test", "action": "get_vod_streams"},
+        ).json()
+        matrix = next(item for item in catalog if item["name"] == "Matrix")
+        stream_id = matrix["stream_id"]
+
+        r = client_no_network.get(
+            "/player_api.php",
+            params={
+                "username": "test",
+                "password": "test",
+                "action": "get_vod_info",
+                "vod_id": str(stream_id),
+            },
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["info"]["name"] == "Matrix"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
