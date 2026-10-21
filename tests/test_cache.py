@@ -425,26 +425,26 @@ class TestCatalogCacheDirect:
         old_time = datetime.utcnow() - timedelta(days=1)
         media = Media(title="Existing", media_type="movie", year=2020, synopsis="Old", updated_at=old_time)
         db_session.add(media)
-        await db_session.commit()
-        await db_session.refresh(media)
+        await db_session.flush()
 
-        old_source = Source(media_id=media.id, provider="old_provider", url="old", quality="720p", language="en")
+        old_source = Source(media_id=media.id, provider="old_provider", url="new-url", quality="720p", language="en")
         db_session.add(old_source)
-        await db_session.commit()
+        await db_session.flush()
 
         item_data = {"title": "Existing", "media_type": "movie", "year": 2024, "synopsis": "Updated", "poster_url": "https://new.jpg"}
         sources_data = [{"provider": "new_provider", "url": "new-url", "quality": "4K", "language": "es"}]
 
+        media_id = media.id
         updated_media = await cache.save_media(item_data, sources_data)
 
-        assert updated_media.id == media.id
+        assert updated_media.id == media_id
         assert updated_media.year == 2024
         assert updated_media.synopsis == "Updated"
         assert updated_media.poster_url == "https://new.jpg"
         assert updated_media.updated_at > old_time
 
         from sqlalchemy import select
-        stmt = select(Source).filter_by(media_id=media.id)
+        stmt = select(Source).filter_by(media_id=media_id)
         result = await db_session.execute(stmt)
         sources = result.scalars().all()
         assert len(sources) == 1

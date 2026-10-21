@@ -62,7 +62,7 @@ class CatalogCache:
             media.genres = json.loads(media.genres)
         return media
 
-    async def save_media(self, item_data: dict, sources_data: list[dict]) -> Media:
+    async def save_media(self, item_data: dict, sources_data: list[dict] = None) -> Media:
         """Crea o actualiza el registro en Media con updated_at = datetime.utcnow(),
         sincroniza las sources asociadas y persiste con commit."""
         title = item_data.get("title")
@@ -72,9 +72,25 @@ class CatalogCache:
         if "genres" in item_data and isinstance(item_data["genres"], list):
             item_data["genres"] = json.dumps(item_data["genres"])
 
-        stmt = select(Media).filter(Media.title == title)
-        if media_type:
-            stmt = stmt.filter(Media.media_type == media_type)
+        # Usar el primer source URL como clave única
+        source_url = sources_data[0].get("url") if sources_data else None
+        if source_url:
+            # JOIN con sources para buscar por URL única con carga impaciente de sources
+            stmt = (
+                select(Media)
+                .options(selectinload(Media.sources))
+                .join(Source, Media.id == Source.media_id)
+                .where(Source.url == source_url)
+            )
+        else:
+            # Fallback: buscar por title con carga impaciente de sources
+            stmt = (
+                select(Media)
+                .options(selectinload(Media.sources))
+                .filter(Media.title == title)
+            )
+            if media_type:
+                stmt = stmt.filter(Media.media_type == media_type)
         result = await self.db.execute(stmt)
         existing = result.scalar_one_or_none()
 
@@ -103,10 +119,11 @@ class CatalogCache:
         # acceder a media.id tras el commit dispara MissingGreenlet
         media_id = media.id
         await self.db.commit()
-        # Recargar con sources sin usar refresh (evita MissingGreenlet)
         stmt = select(Media).options(selectinload(Media.sources)).where(Media.id == media_id)
         result = await self.db.execute(stmt)
-        media = result.scalar_one()
+        media = result.scalar_one_or_none()
+        if media is None:
+            return await self.db.get(Media, media_id)
         return media
 
     def is_valid(self, media: Media) -> bool:
