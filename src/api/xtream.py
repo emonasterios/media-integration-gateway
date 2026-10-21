@@ -67,6 +67,14 @@ def _genre_to_id(genres: list[str], sorted_genres: list[str]) -> str:
     return "1"
 
 
+def _movie_stream_id(movie: MediaItem, fallback_index: int = 1) -> int:
+    """Calcula stream_id estable (1000 + media.id) o usa fallback si media_id no es entero."""
+    try:
+        return 1000 + int(movie.media_id)
+    except (ValueError, TypeError):
+        return 1000 + fallback_index
+
+
 def _build_genre_categories(genres_or_items: list | set | None = None) -> list[dict]:
     """Construye la lista de categorías VOD a partir de géneros o MediaItems."""
     genres: set[str] = set()
@@ -110,11 +118,12 @@ async def _enrich_genres_from_db(items: list[MediaItem], db_path: Path | str | N
 
 def _media_item_to_vod_stream(item: MediaItem, index: int, sorted_genres: list[str] | None = None) -> dict:
     """Convierte MediaItem a dict de stream VOD Xtream Codes."""
+    stream_id = _movie_stream_id(item, index)
     return {
         "num": index,
         "name": item.title,
         "stream_type": "movie",
-        "stream_id": 1000 + index,
+        "stream_id": stream_id,
         "stream_icon": item.poster_url or "",
         "rating": "0",
         "rating_5based": 0.0,
@@ -263,7 +272,7 @@ async def xtream_player_api(
 
         all_movies = await _load_catalog_from_db()
         all_movies.sort(key=lambda m: (m.media_id or "", m.title))
-        item = _stream_id_to_media(stream_id, "movie", all_movies)
+        item = find_movie_by_stream_id(all_movies, stream_id)
         if item is None:
             return {}
 
@@ -381,14 +390,28 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def movie_stream_id(media_id: int) -> int:
+    return 1000 + media_id
+
+
+def media_id_from_stream_id(stream_id: int) -> int:
+    return stream_id - 1000
+
+
+def find_movie_by_stream_id(items: list[MediaItem], stream_id: int) -> MediaItem | None:
+    if stream_id <= 1000:
+        return None
+    for idx, movie in enumerate(items, start=1):
+        if _movie_stream_id(movie, idx) == stream_id:
+            return movie
+    return None
+
+
 def _stream_id_to_media(index: int, media_type: str, catalog: list[MediaItem]) -> MediaItem | None:
     """Busca el MediaItem por stream_id (índice 1-based + offset)."""
     if media_type == "movie":
         movies = [m for m in catalog if m.media_type == MediaType.MOVIE]
-        offset = 0  # stream_id = 1000 + index
-        for idx, item in enumerate(movies, 1):
-            if 1000 + idx == index:
-                return item
+        return find_movie_by_stream_id(movies, index)
     elif media_type == "series":
         series = [m for m in catalog if m.media_type == MediaType.SERIES]
         for idx, item in enumerate(series, 1):
@@ -411,7 +434,7 @@ async def stream_movie(
 ):
     """Reproduce una película VOD. Hace proxy del video real con soporte de rangos."""
     all_movies = await _load_catalog_from_db()
-    media = _stream_id_to_media(stream_id, "movie", all_movies)
+    media = find_movie_by_stream_id(all_movies, stream_id)
     if not media:
         return {"error": "stream not found", "stream_id": stream_id}
 

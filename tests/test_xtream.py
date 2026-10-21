@@ -493,7 +493,7 @@ def test_player_api_get_vod_info(client, temp_db_path):
         assert r.status_code == 200
         data = r.json()
         assert data["info"]["name"] == "Test Movie"
-        assert data["movie_data"]["stream_id"] == 1001
+        assert data["movie_data"]["stream_id"] == 1000 + 1
         assert data["movie_data"]["container_extension"] == "mp4"
     finally:
         xtream_module.DB_PATH = original_db_path
@@ -572,7 +572,7 @@ def test_vod_stream_conversion():
     assert result["num"] == 5
     assert result["name"] == "Test Movie"
     assert result["stream_type"] == "movie"
-    assert result["stream_id"] == 1005
+    assert result["stream_id"] == 1000 + 5
     assert result["stream_icon"] == "https://example.com/test.jpg"
     assert result["rating"] == "0"
     assert result["rating_5based"] == 0.0
@@ -616,6 +616,114 @@ def test_series_stream_conversion():
     assert result["youtube_trailer"] == ""
     assert result["episode_run_time"] == 0
     assert result["category_id"] == "2"
+
+
+def test_stream_id_stable_under_reordering(client, temp_db_path):
+    """Reordenar el catálogo no debe cambiar la identidad ni la resolución de un stream_id."""
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    try:
+        baseline = client.get("/player_api.php", params={
+            "username": "test",
+            "password": "***",
+            "action": "get_vod_streams",
+        }).json()
+        reordered = list(reversed(baseline))
+        assert {item["stream_id"]: item for item in reordered} == {item["stream_id"]: item for item in baseline}
+
+        stream_id = 1001
+        info = client.get(
+            "/player_api.php",
+            params={
+                "username": "test",
+                "password": "***",
+                "action": "get_vod_info",
+                "vod_id": str(stream_id),
+            },
+        )
+        assert info.status_code == 200
+        info_data = info.json()
+        target = next(item for item in baseline if item["stream_id"] == stream_id)
+        assert info_data["movie_data"]["stream_id"] == stream_id
+        assert info_data["info"]["name"] == target["name"]
+
+        movie = client.get(f"/movie/test/test/{stream_id}.mp4", follow_redirects=False)
+        assert movie.status_code == 200
+    finally:
+        xtream_module.DB_PATH = original_db_path
+
+
+def test_stream_id_stable_with_category_filter(client, temp_db_path):
+    """Filtrar por categoría no debe cambiar el stream_id de una misma película."""
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    try:
+        all_items = client.get("/player_api.php", params={
+            "username": "test",
+            "password": "***",
+            "action": "get_vod_streams",
+        }).json()
+        filtered_items = client.get("/player_api.php", params={
+            "username": "test",
+            "password": "***",
+            "action": "get_vod_streams",
+            "category_id": "1",
+        }).json()
+        assert filtered_items
+        assert {item["stream_id"]: item["name"] for item in filtered_items} == {
+            item["stream_id"]: item["name"] for item in all_items if item["category_id"] == "1"
+        }
+    finally:
+        xtream_module.DB_PATH = original_db_path
+
+
+def test_movie_stream_id_matches_catalog_info_and_playback(client, temp_db_path):
+    """Catálogo, detalle y reproducción deben resolver el mismo registro por media_id."""
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    try:
+        catalog = client.get("/player_api.php", params={
+            "username": "test",
+            "password": "***",
+            "action": "get_vod_streams",
+        }).json()
+        target = next(item for item in catalog if item["stream_id"] == 1001)
+        info = client.get("/player_api.php", params={
+            "username": "test",
+            "password": "***",
+            "action": "get_vod_info",
+            "vod_id": "1001",
+        }).json()
+        assert info["movie_data"]["stream_id"] == target["stream_id"]
+        assert info["info"]["name"] == target["name"]
+        movie = client.get("/movie/test/test/1001.mp4", follow_redirects=False)
+        assert movie.status_code == 200
+        assert "video/mp4" in movie.headers["content-type"]
+    finally:
+        xtream_module.DB_PATH = original_db_path
+
+
+def test_vod_stream_id_inexistente_is_controlled(client, temp_db_path):
+    """Un stream_id inexistente debe responder controladamente sin crash."""
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    try:
+        response = client.get(
+            "/player_api.php",
+            params={
+                "username": "test",
+                "password": "***",
+                "action": "get_vod_info",
+                "vod_id": "9999",
+            },
+        )
+        assert response.status_code in (200, 404)
+        assert response.json() is not None
+
+        response = client.get("/movie/test/test/9999.mp4", follow_redirects=False)
+        assert response.status_code == 200
+    finally:
+        xtream_module.DB_PATH = original_db_path
 
 
 if __name__ == "__main__":
