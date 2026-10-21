@@ -20,36 +20,96 @@ from sqlalchemy import select
 from src.adapters.cuevana3 import Cuevana3Adapter
 from src.db.database import AsyncSessionLocal
 from src.db.models import Media, Source
+from src.services.catalog_checkpoint import (
+    CatalogCheckpoint,
+    CheckpointCorruptedError,
+    IncompleteSnapshotError,
+    IncompatibleCheckpointError,
+    load_checkpoint,
+    validate_for_reconciliation,
+)
 
 PROVIDER = "cuevana3"
+DEFAULT_CHECKPOINT_PATH = "data/cuevana3_checkpoint.json"
 
 
-async def sync_catalog(
+async def run_discovery(
+    adapter: Cuevana3Adapter,
+    checkpoint_path: Path,
+    category: str | None,
+    page_limit: int | None = None,
+) -> CatalogCheckpoint:
+    """Ejecuta la fase de descubrimiento con checkpoint duradero."""
+    print(f"Descubriendo catálogo (checkpoint: {checkpoint_path})...")
+    checkpoint = await adapter.discover_resumable(
+        checkpoint_path=checkpoint_path,
+        category=category,
+        page_limit=page_limit,
+    )
+    print(
+        f"Descubrimiento {'completo' if checkpoint.status == 'complete' else 'pausado'}: "
+        f"{len(checkpoint.items)} items en {len(checkpoint.pages_completed)} páginas"
+    )
+    if checkpoint.next_page:
+        print(f"Próxima página: {checkpoint.next_page}")
+    return checkpoint
+
+
+def print_checkpoint_status(checkpoint: CatalogCheckpoint) -> None:
+    """Imprime el resumen del checkpoint."""
+    print(f"Proveedor: {checkpoint.provider}")
+    print(f"Categoría: {checkpoint.category or 'todas'}")
+    print(f"Páginas completadas: {len(checkpoint.pages_completed)}")
+    print(f"Total de ítems descubiertos: {len(checkpoint.items)}")
+    print(f"Estado: {checkpoint.status}")
+    print(f"Próxima página: {checkpoint.next_page or 'ninguna (final)'}")
+
+
+async def sync_from_checkpoint(
+    checkpoint_path: Path,
     limit: int | None = None,
     delay: float = 1.0,
     *,
     dry_run: bool = False,
     allow_large_delete: bool = False,
     enrich_new: bool = False,
+    expected_category: str | None = None,
 ) -> None:
-    adapter = Cuevana3Adapter()
+    """Reconcilia el catálogo desde un checkpoint en disco.
+
+    Barrera estricta: valida que el checkpoint sea completo y compatible
+    ANTES de abrir la base de datos. Si no pasa, aborta con código != 0
+    y CERO escrituras en BD.
+    """
+    # 1) Cargar y validar checkpoint (barrera ANTES de BD)
     try:
-        print("Descubriendo catálogo completo de cuevana3...")
-        catalog = await adapter.get_catalog()
-        snapshot = {
-            item.provider_id: item
-            for item in catalog
-            if item.media_type.value == "movie"
-        }
-        print(f"Snapshot completo: {len(snapshot)} películas únicas")
+        checkpoint = load_checkpoint(checkpoint_path)
+        validate_for_reconciliation(
+            checkpoint,
+            expected_provider=PROVIDER,
+            expected_category=expected_category,
+        )
+    except (CheckpointCorruptedError, IncompleteSnapshotError, IncompatibleCheckpointError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
 
-        delete_enabled = limit is None
-        items = list(snapshot.values())
-        if limit is not None:
-            items = items[:limit]
-            delete_enabled = False
-            print(f"Limitando escrituras a {limit}; borrados DESHABILITADOS")
+    # 2) Construir snapshot desde checkpoint (solo movies)
+    snapshot = {
+        item["provider_id"]: item
+        for item in checkpoint.items
+        if item.get("media_type") == "movie"
+    }
+    print(f"Snapshot desde checkpoint: {len(snapshot)} películas únicas")
 
+    delete_enabled = limit is None
+    items = list(snapshot.values())
+    if limit is not None:
+        items = items[:limit]
+        delete_enabled = False
+        print(f"Limitando escrituras a {limit}; borrados DESHABILITADOS")
+
+    adapter = Cuevana3Adapter() if enrich_new else None
+    try:
         async with AsyncSessionLocal() as db:
             rows = (
                 await db.execute(
@@ -74,35 +134,36 @@ async def sync_catalog(
             new_media: dict[str, Media] = {}
 
             for item in items:
-                current = existing.get(item.provider_id)
+                provider_id = item["provider_id"]
+                current = existing.get(provider_id)
                 if current:
                     _source, media = current
-                    media.title = item.title
-                    media.original_title = item.title
-                    media.year = item.year
-                    if item.poster_url:
-                        media.poster_url = item.poster_url
+                    media.title = item["title"]
+                    media.original_title = item["title"]
+                    media.year = item.get("year")
+                    if item.get("poster"):
+                        media.poster_url = item["poster"]
                     updated += 1
                 else:
                     media = Media(
-                        title=item.title,
-                        original_title=item.title,
-                        media_type=item.media_type.value,
-                        year=item.year,
-                        poster_url=item.poster_url,
-                        synopsis=item.overview,
-                        genres=json.dumps(item.genres or []),
+                        title=item["title"],
+                        original_title=item["title"],
+                        media_type=item.get("media_type", "movie"),
+                        year=item.get("year"),
+                        poster_url=item.get("poster"),
+                        synopsis=item.get("overview"),
+                        genres=json.dumps(item.get("genres") or []),
                     )
                     media.sources.append(
                         Source(
                             provider=PROVIDER,
-                            url=item.provider_id,
+                            url=provider_id,
                             quality="auto",
                             language="es",
                         )
                     )
                     db.add(media)
-                    new_media[item.provider_id] = media
+                    new_media[provider_id] = media
                     added += 1
 
             if delete_enabled:
@@ -127,7 +188,7 @@ async def sync_catalog(
             for source in orphan_sources:
                 await db.delete(source)
 
-            if enrich_new:
+            if enrich_new and adapter is not None:
                 for index, (provider_id, media) in enumerate(new_media.items(), 1):
                     try:
                         details = await adapter.get_details(provider_id)
@@ -158,6 +219,41 @@ async def sync_catalog(
                 f"{enriched} enriquecidas, {errors} errores"
             )
     finally:
+        if adapter is not None:
+            await adapter.close()
+
+
+async def sync_catalog(
+    limit: int | None = None,
+    delay: float = 1.0,
+    *,
+    dry_run: bool = False,
+    allow_large_delete: bool = False,
+    enrich_new: bool = False,
+    checkpoint_path: Path | str = DEFAULT_CHECKPOINT_PATH,
+    category: str | None = None,
+    page_limit: int | None = None,
+) -> None:
+    """Flujo completo: descubrimiento (con checkpoint) + reconciliación."""
+    adapter = Cuevana3Adapter()
+    try:
+        checkpoint = await run_discovery(adapter, Path(checkpoint_path), category, page_limit)
+        if checkpoint.status != "complete":
+            print(
+                f"Descubrimiento incompleto ({len(checkpoint.pages_completed)} páginas). "
+                f"Use --from-checkpoint {checkpoint_path} para reanudar o reconciliar."
+            )
+            return
+        await sync_from_checkpoint(
+            Path(checkpoint_path),
+            limit=limit,
+            delay=delay,
+            dry_run=dry_run,
+            allow_large_delete=allow_large_delete,
+            enrich_new=enrich_new,
+            expected_category=category,
+        )
+    finally:
         await adapter.close()
 
 
@@ -176,13 +272,80 @@ if __name__ == "__main__":
         action="store_true",
         help="Consultar detalles solo para las películas nuevas",
     )
-    args = parser.parse_args()
-    asyncio.run(
-        sync_catalog(
-            limit=args.limit,
-            delay=args.delay,
-            dry_run=args.dry_run,
-            allow_large_delete=args.allow_large_delete,
-            enrich_new=args.enrich_new,
-        )
+    parser.add_argument(
+        "--checkpoint-path",
+        type=str,
+        default=DEFAULT_CHECKPOINT_PATH,
+        help=f"Ruta del archivo de checkpoint (por defecto: {DEFAULT_CHECKPOINT_PATH})",
     )
+    parser.add_argument(
+        "--category",
+        type=str,
+        default=None,
+        help="Categoría/género a rastrear (ej: accion, drama, comedia)",
+    )
+    parser.add_argument(
+        "--page-limit",
+        type=int,
+        default=None,
+        help="Limitar número de páginas a rastrear (checkpoint queda incomplete)",
+    )
+    parser.add_argument(
+        "--discover-only",
+        action="store_true",
+        help="Ejecutar solo la fase de descubrimiento y guardar checkpoint, sin reconciliar",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Mostrar resumen del checkpoint actual y salir con código 0",
+    )
+    parser.add_argument(
+        "--from-checkpoint",
+        action="store_true",
+        help="Reconciliar catálogo desde checkpoint en disco (sin rastreo en vivo)",
+    )
+    args = parser.parse_args()
+
+    if args.status:
+        try:
+            checkpoint = load_checkpoint(args.checkpoint_path)
+            print_checkpoint_status(checkpoint)
+            sys.exit(0)
+        except CheckpointCorruptedError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    if args.from_checkpoint:
+        asyncio.run(
+            sync_from_checkpoint(
+                Path(args.checkpoint_path),
+                limit=args.limit,
+                delay=args.delay,
+                dry_run=args.dry_run,
+                allow_large_delete=args.allow_large_delete,
+                enrich_new=args.enrich_new,
+                expected_category=args.category,
+            )
+        )
+    elif args.discover_only:
+        adapter = Cuevana3Adapter()
+        try:
+            asyncio.run(
+                run_discovery(adapter, Path(args.checkpoint_path), args.category, args.page_limit)
+            )
+        finally:
+            asyncio.run(adapter.close())
+    else:
+        asyncio.run(
+            sync_catalog(
+                limit=args.limit,
+                delay=args.delay,
+                dry_run=args.dry_run,
+                allow_large_delete=args.allow_large_delete,
+                enrich_new=args.enrich_new,
+                checkpoint_path=args.checkpoint_path,
+                category=args.category,
+                page_limit=args.page_limit,
+            )
+        )

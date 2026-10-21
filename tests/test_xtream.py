@@ -16,6 +16,17 @@ from src.api.xtream import _get_catalog_service, _build_genre_categories, _genre
 import src.api.xtream as xtream_module
 
 
+@pytest.fixture(autouse=True)
+def isolate_xtream_default_db(tmp_path):
+    """Impide que cualquier endpoint Xtream cree `data/gateway.db` en tests."""
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = tmp_path / "default_gateway.db"
+    try:
+        yield
+    finally:
+        xtream_module.DB_PATH = original_db_path
+
+
 
 
 class FakeCuevana3Provider(MediaProvider):
@@ -554,19 +565,24 @@ def test_player_api_get_series_reads_database(client, temp_db_path):
         xtream_module.DB_PATH = original_db_path
 
 
-def test_panel_api(client):
+def test_panel_api(client, temp_db_path):
     """GET /panel_api.php?username=test&password=test responde con panel_info y contadores."""
-    r = client.get("/panel_api.php?username=test&password=test")
-    assert r.status_code == 200
-    data = r.json()
-    assert "panel_info" in data
-    panel = data["panel_info"]
-    assert panel["live_streams"] == 1
-    assert panel["vod_streams"] == 3  # Dos cuevana3 + 1 cuevan_net
-    assert panel["series_streams"] == 1  # Una serie
-    assert panel["episodes"] == 0
-    assert panel["active_connections"] == 0
-    assert panel["max_connections"] == 1
+    original_db_path = xtream_module.DB_PATH
+    xtream_module.DB_PATH = temp_db_path
+    try:
+        r = client.get("/panel_api.php?username=test&password=test")
+        assert r.status_code == 200
+        data = r.json()
+        assert "panel_info" in data
+        panel = data["panel_info"]
+        assert panel["live_streams"] == 1
+        assert panel["vod_streams"] == 3
+        assert panel["series_streams"] == 1
+        assert panel["episodes"] == 0
+        assert panel["active_connections"] == 0
+        assert panel["max_connections"] == 1
+    finally:
+        xtream_module.DB_PATH = original_db_path
 
 
 def test_panel_api_auth_invalid(client):

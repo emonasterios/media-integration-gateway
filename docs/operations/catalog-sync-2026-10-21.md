@@ -41,3 +41,50 @@ ssh root@192.168.122.120 "curl contra /player_api.php?action=get_vod_streams y v
 
 No se ejecutaron despliegues, reinicios, cambios de configuración ni comandos
 de escritura sobre la base de datos.
+
+## Descubrimiento reanudable mediante checkpoint
+
+El descubrimiento y la reconciliación están separados. El checkpoint es JSON
+versión 1 y contiene `provider`, `category`, `initial_path`, `next_page`,
+`pages_completed`, `items` y `status`. Se escribe de forma atómica mediante un
+temporal adyacente y reemplazo, por lo que un fallo conserva el último archivo
+válido. La ruta es configurable con `--checkpoint-path`; el valor por defecto
+es `data/cuevana3_checkpoint.json`.
+
+Consultar el progreso sin rastrear ni abrir la base de datos:
+
+```bash
+python scripts/sync_catalog.py \
+  --checkpoint-path /ruta/segura/cuevana3-checkpoint.json \
+  --status
+```
+
+Iniciar o reanudar únicamente el descubrimiento:
+
+```bash
+python scripts/sync_catalog.py \
+  --checkpoint-path /ruta/segura/cuevana3-checkpoint.json \
+  --discover-only
+```
+
+Si el proceso falla, se vuelve a ejecutar el mismo comando con la misma ruta.
+Las páginas incluidas en `pages_completed` no se solicitan nuevamente y el
+rastreo continúa desde `next_page`. No se debe borrar ni editar manualmente el
+checkpoint durante la recuperación.
+
+Cuando `--status` indique `complete`, validar la reconciliación con rollback:
+
+```bash
+python scripts/sync_catalog.py \
+  --checkpoint-path /ruta/segura/cuevana3-checkpoint.json \
+  --from-checkpoint --dry-run
+```
+
+Para checkpoints de una categoría concreta, se debe repetir la misma categoría
+en cada operación, por ejemplo `--category accion`. El proveedor y la categoría
+se validan antes de abrir la base de datos.
+
+Un checkpoint `incomplete`, corrupto, de versión incompatible, de otro proveedor
+o de otra categoría está prohibido para reconciliación. La herramienta aborta
+antes de abrir la sesión de base de datos; nunca se debe usar un snapshot parcial
+para inferir bajas.

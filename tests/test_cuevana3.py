@@ -2,10 +2,11 @@
 
 import pytest
 import httpx
+import re
 from unittest.mock import AsyncMock, patch
 from bs4 import BeautifulSoup
 
-from src.adapters.cuevana3 import Cuevana3Adapter
+from src.adapters.cuevana3 import Cuevana3Adapter, CatalogCrawlError
 from src.models.catalog import MediaType, SearchResult, MediaItem, PlaybackDescriptor
 
 
@@ -643,6 +644,425 @@ async def test_adapter_close_closes_video_resolver(adapter):
 
     adapter._video_resolver.close.assert_awaited_once()
     adapter._client.aclose.assert_awaited_once()
+
+
+# ----------------------------------------------------------------------
+# Tests de descubrimiento reanudable (discover_resumable)
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+async def adapter_with_mock():
+    """Fixture que provee un Cuevana3Adapter con cliente HTTP mockeado."""
+    adapter = Cuevana3Adapter()
+    adapter._client = AsyncMock()
+    yield adapter
+    await adapter.close()
+
+
+# HTML helper para páginas de catálogo simuladas
+
+def make_catalog_page(items: list[dict], next_href: str | None = None) -> str:
+    """Genera HTML de página de catálogo con los items dados y link next opcional."""
+    html_parts = ["<!DOCTYPE html><html><body>"]
+    for item in items:
+        href = item.get("href", f"/pelicula/{item['provider_id']}/")
+        title = item.get("title", item["provider_id"])
+        poster = item.get("poster", "/img/poster.jpg")
+        year = item.get("year", 2024)
+        media_type = item.get("media_type", "movie")
+        html_parts.append(
+            f'<div class="TPost">'
+            f'  <a href="{href}">{title}'
+            f'    <figure class="Objf">'
+            f'      <img src="{poster}" alt="{title}" />'
+            f'    </figure>'
+            f'  </a>'
+            f'  <span class="Year">{year}</span>'
+            f'</div>'
+        )
+    if next_href:
+        html_parts.append(f'<a class="next page-numbers" href="{next_href}"></a>')
+    html_parts.append("</body></html>")
+    return "\n".join(html_parts)
+
+
+@pytest.mark.asyncio
+async def test_cuevana3_discover_resumable_more_than_20_pages_complete(adapter_with_mock, tmp_path):
+    """Procesa más de 20 páginas consecutivas y finaliza con status complete."""
+    adapter = adapter_with_mock
+    num_pages = 22
+    items_per_page = 3
+    total_items = num_pages * items_per_page
+
+    # Preparar mocks: 22 páginas con next_href hasta la última
+    async def mock_get(url, *args, **kwargs):
+        page_num = int(re.search(r'page/(\d+)', url).group(1)) if 'page/' in url else 1
+        next_href = f"/peliculas/page/{page_num + 1}/" if page_num < num_pages else None
+        items = [
+            {
+                "provider_id": f"movie-{page_num}-{i}",
+                "title": f"Movie {page_num}-{i}",
+                "poster": f"/img/poster-{page_num}-{i}.jpg",
+                "year": 2024,
+                "media_type": "movie",
+                "href": f"/pelicula/movie-{page_num}-{i}/",
+            }
+            for i in range(items_per_page)
+        ]
+        return MockResponse(make_catalog_page(items, next_href))
+
+    adapter._client.get.side_effect = mock_get
+
+    # Desactivar sleep
+    async def no_sleep(_):
+        return None
+    import src.adapters.cuevana3 as cuevana3_module
+    original_sleep = cuevana3_module.asyncio.sleep
+    cuevana3_module.asyncio.sleep = no_sleep
+    try:
+        checkpoint_path = tmp_path / "checkpoint_22pages.json"
+        checkpoint = await adapter.discover_resumable(checkpoint_path=checkpoint_path, page_limit=None)
+
+        # Verificaciones
+        assert checkpoint.status == "complete"
+        assert checkpoint.next_page is None
+        assert len(checkpoint.pages_completed) == num_pages
+        assert len(checkpoint.items) == total_items
+        assert checkpoint.pages_completed == list(range(1, num_pages + 1))
+
+        # Verificar que se llamó al cliente HTTP para cada página
+        assert adapter._client.get.await_count == num_pages
+    finally:
+        cuevana3_module.asyncio.sleep = original_sleep
+
+
+@pytest.mark.asyncio
+async def test_cuevana3_discover_resumable_intermediate_failure_retries_and_incomplete(adapter_with_mock, tmp_path):
+    """Falla persistente en página intermedia agota 3 reintentos y deja checkpoint incomplete."""
+    adapter = adapter_with_mock
+
+    call_count = [0]
+
+    async def mock_get(url, *args, **kwargs):
+        call_count[0] += 1
+        page_num = int(re.search(r'page/(\d+)', url).group(1)) if 'page/' in url else 1
+
+        if page_num == 5:
+            # Página 5: fallar siempre (3 reintentos)
+            raise httpx.TimeoutException("Timeout simulado en página 5")
+
+        # Páginas 1-4: éxito
+        items = [
+            {
+                "provider_id": f"movie-{page_num}-{i}",
+                "title": f"Movie {page_num}-{i}",
+                "poster": f"/img/poster-{page_num}-{i}.jpg",
+                "year": 2024,
+                "media_type": "movie",
+                "href": f"/pelicula/movie-{page_num}-{i}/",
+            }
+            for i in range(3)
+        ]
+        next_href = f"/peliculas/page/{page_num + 1}/"
+        return MockResponse(make_catalog_page(items, next_href))
+
+    adapter._client.get.side_effect = mock_get
+
+    # Desactivar sleep
+    import src.adapters.cuevana3 as cuevana3_module
+    original_sleep = cuevana3_module.asyncio.sleep
+    async def no_sleep(_):
+        return None
+    cuevana3_module.asyncio.sleep = no_sleep
+    try:
+        checkpoint_path = tmp_path / "checkpoint_fail_page5.json"
+        with pytest.raises(CatalogCrawlError, match="Error en página 5"):
+            await adapter.discover_resumable(checkpoint_path=checkpoint_path, page_limit=None)
+    finally:
+        cuevana3_module.asyncio.sleep = original_sleep
+
+    # Verificar checkpoint guardado: 4 páginas completadas, next_page = página 5
+    from src.services.catalog_checkpoint import load_checkpoint
+    saved = load_checkpoint(checkpoint_path)
+    assert saved.status == "incomplete"
+    assert saved.next_page == "/peliculas/page/5/"
+    assert len(saved.pages_completed) == 4
+    assert saved.pages_completed == [1, 2, 3, 4]
+    assert len(saved.items) == 12  # 4 páginas * 3 items
+
+    # Verificar 3 reintentos en página 5 + 4 páginas exitosas = 7 llamadas totales
+    # (4 páginas * 1 intento + 1 página * 3 reintentos = 7)
+    assert call_count[0] == 7
+
+
+@pytest.mark.asyncio
+async def test_cuevana3_discover_resumable_resume_skips_confirmed_pages(adapter_with_mock, tmp_path):
+    """Reanudar desde checkpoint incomplete no vuelve a solicitar páginas ya confirmadas."""
+    adapter = adapter_with_mock
+
+    # 1. Crear checkpoint incompleto simulado (páginas 1-4 completadas, next_page = 5)
+    from src.services.catalog_checkpoint import CatalogCheckpoint, save_checkpoint
+    initial_ckpt = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        next_page="/peliculas/page/5/",
+        pages_completed=[1, 2, 3, 4],
+        items=[
+            {
+                "provider": "cuevana3",
+                "provider_id": f"movie-{p}-{i}",
+                "title": f"Movie {p}-{i}",
+                "url": f"https://cuevana3i.cc/pelicula/movie-{p}-{i}/",
+                "poster": f"https://cuevana3i.cc/img/poster-{p}-{i}.jpg",
+                "media_type": "movie",
+                "year": 2024,
+                "category": None,
+            }
+            for p in range(1, 5) for i in range(3)
+        ],
+        status="incomplete",
+    )
+    checkpoint_path = tmp_path / "checkpoint_resume.json"
+    save_checkpoint(initial_ckpt, checkpoint_path)
+
+    # 2. Mock: páginas 5-7 exitosas, página 8 final (sin next)
+    call_count = [0]
+    pages_requested = []
+
+    async def mock_get(url, *args, **kwargs):
+        call_count[0] += 1
+        page_num = int(re.search(r'page/(\d+)', url).group(1)) if 'page/' in url else 1
+        pages_requested.append(page_num)
+
+        items = [
+            {
+                "provider_id": f"movie-{page_num}-{i}",
+                "title": f"Movie {page_num}-{i}",
+                "poster": f"/img/poster-{page_num}-{i}.jpg",
+                "year": 2024,
+                "media_type": "movie",
+                "href": f"/pelicula/movie-{page_num}-{i}/",
+            }
+            for i in range(3)
+        ]
+        next_href = f"/peliculas/page/{page_num + 1}/" if page_num < 7 else None
+        return MockResponse(make_catalog_page(items, next_href))
+
+    adapter._client.get.side_effect = mock_get
+
+    # Desactivar sleep
+    import src.adapters.cuevana3 as cuevana3_module
+    original_sleep = cuevana3_module.asyncio.sleep
+    async def no_sleep(_):
+        return None
+    cuevana3_module.asyncio.sleep = no_sleep
+    try:
+        checkpoint = await adapter.discover_resumable(checkpoint_path=checkpoint_path, page_limit=None)
+    finally:
+        cuevana3_module.asyncio.sleep = original_sleep
+
+    # Verificaciones
+    assert checkpoint.status == "complete"
+    assert len(checkpoint.pages_completed) == 7  # 4 previas + 3 nuevas
+    assert checkpoint.pages_completed == [1, 2, 3, 4, 5, 6, 7]
+    assert len(checkpoint.items) == 21  # 7 páginas * 3 items
+
+    # CRITICAL: Solo se deben haber solicitado páginas 5, 6, 7 (NO 1-4)
+    assert pages_requested == [5, 6, 7], f"Páginas solicitadas: {pages_requested}"
+    assert call_count[0] == 3
+
+
+@pytest.mark.asyncio
+async def test_cuevana3_discover_resumable_second_failure_preserves_checkpoint(adapter_with_mock, tmp_path):
+    """Segunda falla al reanudar preserva items acumulados y mantiene incomplete."""
+    adapter = adapter_with_mock
+
+    # 1. Checkpoint con 7 páginas completadas (páginas 1-7)
+    from src.services.catalog_checkpoint import CatalogCheckpoint, save_checkpoint, load_checkpoint
+    initial_ckpt = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        next_page="/peliculas/page/8/",
+        pages_completed=[1, 2, 3, 4, 5, 6, 7],
+        items=[
+            {
+                "provider": "cuevana3",
+                "provider_id": f"movie-{p}-{i}",
+                "title": f"Movie {p}-{i}",
+                "url": f"https://cuevana3i.cc/pelicula/movie-{p}-{i}/",
+                "poster": f"https://cuevana3i.cc/img/poster-{p}-{i}.jpg",
+                "media_type": "movie",
+                "year": 2024,
+                "category": None,
+            }
+            for p in range(1, 8) for i in range(2)
+        ],  # 7 páginas * 2 = 14 items
+        status="incomplete",
+    )
+    checkpoint_path = tmp_path / "checkpoint_second_fail.json"
+    save_checkpoint(initial_ckpt, checkpoint_path)
+
+    # 2. Reanudar y fallar en página 8 (3 reintentos)
+    call_count = [0]
+
+    async def mock_get(url, *args, **kwargs):
+        call_count[0] += 1
+        page_num = int(re.search(r'page/(\d+)', url).group(1)) if 'page/' in url else 1
+
+        if page_num == 8:
+            raise httpx.TimeoutException("Timeout simulado en página 8")
+
+        # No debería llegar aquí porque la reanudación empieza en página 8
+        items = []
+        return MockResponse(make_catalog_page(items, None))
+
+    adapter._client.get.side_effect = mock_get
+
+    import src.adapters.cuevana3 as cuevana3_module
+    original_sleep = cuevana3_module.asyncio.sleep
+    async def no_sleep(_):
+        return None
+    cuevana3_module.asyncio.sleep = no_sleep
+    try:
+        with pytest.raises(CatalogCrawlError, match="Error en página 8"):
+            await adapter.discover_resumable(checkpoint_path=checkpoint_path, page_limit=None)
+    finally:
+        cuevana3_module.asyncio.sleep = original_sleep
+
+    # Verificar checkpoint resultante: items preservados, status incomplete, next_page = 8
+    saved = load_checkpoint(checkpoint_path)
+    assert saved.status == "incomplete"
+    assert saved.next_page == "/peliculas/page/8/"
+    assert saved.pages_completed == [1, 2, 3, 4, 5, 6, 7]
+    assert len(saved.items) == 14  # Items originales preservados
+
+    # Verificar que los items específicos están intactos
+    provider_ids = {(item["provider"], item["provider_id"]) for item in saved.items}
+    for p in range(1, 8):
+        for i in range(2):
+            assert ("cuevana3", f"movie-{p}-{i}") in provider_ids
+
+    # 3 reintentos en página 8
+    assert call_count[0] == 3
+
+
+@pytest.mark.asyncio
+async def test_cuevana3_discover_resumable_deduplication_across_pages(adapter_with_mock, tmp_path):
+    """Películas con URLs repetidas entre páginas y tras reanudación aparecen una sola vez."""
+    adapter = adapter_with_mock
+
+    # 1. Checkpoint con 3 páginas, algunas items repetidos en página 3
+    from src.services.catalog_checkpoint import CatalogCheckpoint, save_checkpoint, load_checkpoint
+    initial_ckpt = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        next_page="/peliculas/page/4/",
+        pages_completed=[1, 2, 3],
+        items=[
+            # Página 1: movie-A, movie-B
+            {"provider": "cuevana3", "provider_id": "movie-A", "title": "Movie A",
+             "url": "https://cuevana3i.cc/pelicula/movie-A/", "poster": "https://cuevana3i.cc/img/a.jpg",
+             "media_type": "movie", "year": 2024, "category": None},
+            {"provider": "cuevana3", "provider_id": "movie-B", "title": "Movie B",
+             "url": "https://cuevana3i.cc/pelicula/movie-B/", "poster": "https://cuevana3i.cc/img/b.jpg",
+             "media_type": "movie", "year": 2024, "category": None},
+            # Página 2: movie-C, movie-D
+            {"provider": "cuevana3", "provider_id": "movie-C", "title": "Movie C",
+             "url": "https://cuevana3i.cc/pelicula/movie-C/", "poster": "https://cuevana3i.cc/img/c.jpg",
+             "media_type": "movie", "year": 2024, "category": None},
+            {"provider": "cuevana3", "provider_id": "movie-D", "title": "Movie D",
+             "url": "https://cuevana3i.cc/pelicula/movie-D/", "poster": "https://cuevana3i.cc/img/d.jpg",
+             "media_type": "movie", "year": 2024, "category": None},
+            # Página 3: movie-E, movie-A (duplicado con página 1)
+            {"provider": "cuevana3", "provider_id": "movie-E", "title": "Movie E",
+             "url": "https://cuevana3i.cc/pelicula/movie-E/", "poster": "https://cuevana3i.cc/img/e.jpg",
+             "media_type": "movie", "year": 2024, "category": None},
+            {"provider": "cuevana3", "provider_id": "movie-A", "title": "Movie A (dup)",
+             "url": "https://cuevana3i.cc/pelicula/movie-A/", "poster": "https://cuevana3i.cc/img/a.jpg",
+             "media_type": "movie", "year": 2024, "category": None},
+        ],
+        status="incomplete",
+    )
+    checkpoint_path = tmp_path / "checkpoint_dedup.json"
+    save_checkpoint(initial_ckpt, checkpoint_path)
+
+    # 2. Reanudar: página 4 tiene movie-B (dup con pág 1) y movie-F (nuevo)
+    #    página 5 es la última
+    call_count = [0]
+
+    async def mock_get(url, *args, **kwargs):
+        call_count[0] += 1
+        page_num = int(re.search(r'page/(\d+)', url).group(1)) if 'page/' in url else 1
+
+        if page_num == 4:
+            items = [
+                {
+                    "provider_id": "movie-B",  # Duplicado
+                    "title": "Movie B (dup)",
+                    "poster": "/img/b.jpg",
+                    "year": 2024,
+                    "media_type": "movie",
+                    "href": "/pelicula/movie-B/",
+                },
+                {
+                    "provider_id": "movie-F",  # Nuevo
+                    "title": "Movie F",
+                    "poster": "/img/f.jpg",
+                    "year": 2024,
+                    "media_type": "movie",
+                    "href": "/pelicula/movie-F/",
+                },
+            ]
+            next_href = "/peliculas/page/5/"
+            return MockResponse(make_catalog_page(items, next_href))
+        elif page_num == 5:
+            items = [
+                {
+                    "provider_id": "movie-G",
+                    "title": "Movie G",
+                    "poster": "/img/g.jpg",
+                    "year": 2024,
+                    "media_type": "movie",
+                    "href": "/pelicula/movie-G/",
+                },
+            ]
+            next_href = None  # Última página
+            return MockResponse(make_catalog_page(items, next_href))
+        return MockResponse(make_catalog_page([], None))
+
+    adapter._client.get.side_effect = mock_get
+
+    import src.adapters.cuevana3 as cuevana3_module
+    original_sleep = cuevana3_module.asyncio.sleep
+    async def no_sleep(_):
+        return None
+    cuevana3_module.asyncio.sleep = no_sleep
+    try:
+        checkpoint = await adapter.discover_resumable(checkpoint_path=checkpoint_path, page_limit=None)
+    finally:
+        cuevana3_module.asyncio.sleep = original_sleep
+
+    # Verificaciones finales
+    assert checkpoint.status == "complete"
+    assert checkpoint.pages_completed == [1, 2, 3, 4, 5]
+
+    # Debe haber exactamente 7 items únicos: A, B, C, D, E, F, G
+    assert len(checkpoint.items) == 7
+    provider_ids = {(item["provider"], item["provider_id"]) for item in checkpoint.items}
+    expected_ids = {("cuevana3", pid) for pid in ["movie-A", "movie-B", "movie-C", "movie-D", "movie-E", "movie-F", "movie-G"]}
+    assert provider_ids == expected_ids
+
+    # Verificar que no hay duplicados: cada provider_id aparece una vez
+    from collections import Counter
+    pid_counts = Counter(item["provider_id"] for item in checkpoint.items)
+    assert all(count == 1 for count in pid_counts.values()), f"Duplicados encontrados: {pid_counts}"
+
+    # 2 llamadas HTTP (páginas 4 y 5)
+    assert call_count[0] == 2
 
 
 if __name__ == "__main__":

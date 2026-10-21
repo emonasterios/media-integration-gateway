@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -22,6 +23,13 @@ from src.models.catalog import (
     PlaybackDescriptor,
     Season,
     SearchResult,
+)
+from src.services.catalog_checkpoint import (
+    CatalogCheckpoint,
+    IncompatibleCheckpointError,
+    add_items_deduplicated,
+    load_checkpoint,
+    save_checkpoint,
 )
 from src.services.flaresolverr import FlareSolverrClient
 from src.services.video_resolver import VideoResolver
@@ -235,6 +243,229 @@ class Cuevana3Adapter(MediaProvider):
 
         logger.info("Catálogo completo: %d items en %d páginas", len(all_items), page)
         return all_items
+
+    # ------------------------------------------------------------------
+    # Catálogo reanudable con checkpoint duradero
+    # ------------------------------------------------------------------
+    async def discover_resumable(
+        self,
+        checkpoint_path: Path | str,
+        category: Optional[str] = None,
+        page_limit: Optional[int] = None,
+    ) -> CatalogCheckpoint:
+        """Descubre el catálogo página a página con checkpoint duradero.
+
+        Si ``checkpoint_path`` existe se carga con ``load_checkpoint``: un
+        checkpoint ``complete`` se retorna tal cual y uno ``incomplete`` se
+        reanuda desde ``next_page`` sin volver a solicitar las páginas ya
+        registradas en ``pages_completed``. Si no existe, se inicializa uno
+        nuevo en estado ``incomplete``. Tras cada página descargada y
+        parseada con éxito se deduplican los elementos en el acumulador, se
+        actualizan ``pages_completed`` y ``next_page`` y se persiste el
+        checkpoint de forma atómica con ``save_checkpoint``. Un fallo de red
+        no recuperable propaga :class:`CatalogCrawlError` dejando íntegro en
+        disco el último checkpoint guardado.
+        """
+        path = "/peliculas/" if not category else f"/genero/{category}/"
+        ckpt_file = Path(checkpoint_path)
+
+        from src.services.catalog_checkpoint import add_items_deduplicated
+
+        checkpoint: CatalogCheckpoint | None = None
+        page_path: Optional[str] = None
+        if ckpt_file.is_file():
+            loaded = load_checkpoint(ckpt_file)
+            if loaded.provider != self.name or (loaded.category or None) != (
+                category or None
+            ):
+                raise IncompatibleCheckpointError(
+                    f"El checkpoint {ckpt_file} pertenece a "
+                    f"provider={loaded.provider!r}, category={loaded.category!r}; "
+                    f"no coincide con provider={self.name!r}, category={category!r}"
+                )
+            if loaded.status == "complete":
+                logger.info(
+                    "Checkpoint ya completo (%d items) en %s; sin rastreo",
+                    len(loaded.items),
+                    ckpt_file,
+                )
+                return loaded
+            # Reanudación: conservar items y páginas ya confirmadas.
+            # Deduplicar items existentes por si el checkpoint previo ya tenía duplicados.
+            checkpoint = CatalogCheckpoint(
+                version=loaded.version,
+                provider=loaded.provider,
+                category=loaded.category,
+                initial_path=loaded.initial_path,
+                next_page=loaded.next_page,
+                pages_completed=loaded.pages_completed,
+                items=add_items_deduplicated([], loaded.items),
+                status=loaded.status,
+            )
+            page_path = checkpoint.next_page
+            logger.info(
+                "Reanudando descubrimiento en %s desde %r (%d páginas completadas)",
+                ckpt_file,
+                checkpoint.next_page,
+                len(checkpoint.pages_completed),
+            )
+        else:
+            checkpoint = CatalogCheckpoint(
+                provider=self.name,
+                category=category,
+                initial_path=path,
+                next_page=path,
+                pages_completed=[],
+                items=[],
+                status="incomplete",
+            )
+            page_path = checkpoint.next_page
+
+        page = (max(checkpoint.pages_completed) + 1) if checkpoint.pages_completed else 1
+        visited_pages: set[str] = set()
+
+        while page_path:
+            if page_limit is not None and len(checkpoint.pages_completed) >= page_limit:
+                logger.info(
+                    "Límite de %d páginas alcanzado; el checkpoint queda "
+                    "incomplete para reanudar más tarde",
+                    page_limit,
+                )
+                break
+
+            absolute_page = urljoin(f"{self._base}/", page_path)
+            if absolute_page in visited_pages:
+                raise CatalogCrawlError(
+                    f"Paginación cíclica detectada en página {page}: {absolute_page}"
+                )
+            visited_pages.add(absolute_page)
+
+            last_error: httpx.HTTPError | None = None
+            resp: httpx.Response | None = None
+            for attempt in range(1, 4):
+                try:
+                    resp = await self._client.get(page_path)
+                    resp.raise_for_status()
+                    last_error = None
+                    break
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Fallo en catálogo página %d (intento %d/3): %s",
+                        page,
+                        attempt,
+                        exc,
+                    )
+                    if attempt < 3:
+                        await asyncio.sleep(attempt * 2)
+
+            if last_error is not None or resp is None:
+                raise CatalogCrawlError(
+                    f"Error en página {page} tras 3 intentos; el checkpoint en "
+                    f"{ckpt_file} conserva el progreso previo: {last_error}"
+                ) from last_error
+
+            soup = BeautifulSoup(resp.text, "lxml")
+            posts = soup.select("div.TPost")
+            if not posts:
+                raise CatalogCrawlError(
+                    f"Página {page} no contiene elementos; el checkpoint en "
+                    f"{ckpt_file} conserva el progreso previo"
+                )
+
+            new_items: list[dict] = []
+            for post in posts:
+                link = post.find("a", href=True)
+                if not link:
+                    continue
+
+                title_text = link.get_text(strip=True)
+                title, year = self._parse_title_and_year(title_text)
+
+                year_el = post.select_one("span.Year")
+                if year is None and year_el:
+                    m = re.search(r"\b(19|20)\d{2}\b", year_el.get_text())
+                    year = int(m.group(0)) if m else None
+
+                img_el = post.select_one("figure.Objf img") or post.find("img")
+                poster_url = None
+                if img_el:
+                    src = img_el.get("src")
+                    if src and src.startswith("data:"):
+                        src = img_el.get("data-src")
+                    if src and not src.startswith("data:"):
+                        poster_url = urljoin(self._base, src) if not src.startswith("http") else src
+
+                provider_id = self._slug_from_url(link["href"])
+                if not provider_id:
+                    continue
+                media_type = MediaType.SERIES if "/serie/" in link["href"] else MediaType.MOVIE
+
+                new_items.append(
+                    {
+                        "provider": self.name,
+                        "provider_id": provider_id,
+                        "title": title,
+                        "url": urljoin(self._base, link["href"]),
+                        "poster": poster_url,
+                        "media_type": media_type.value,
+                        "year": year,
+                        "category": checkpoint.category,
+                    }
+                )
+
+            checkpoint.items = add_items_deduplicated(checkpoint.items, new_items)
+            checkpoint.pages_completed.append(page)
+
+            next_link = soup.select_one("a.next.page-numbers[href]")
+            next_href = next_link["href"] if next_link else None
+            if not next_href:
+                checkpoint.next_page = None
+                checkpoint.status = "complete"
+            else:
+                checkpoint.next_page = next_href
+                checkpoint.status = "incomplete"
+
+            save_checkpoint(checkpoint, ckpt_file)
+            logger.info(
+                "Página %d: %d items (total acumulado: %d); checkpoint guardado en %s",
+                page,
+                len(posts),
+                len(checkpoint.items),
+                ckpt_file,
+            )
+
+            if checkpoint.next_page is None:
+                page_path = None
+                continue
+            page_path = checkpoint.next_page
+            page += 1
+            # Delay entre páginas para no ser baneado
+            await asyncio.sleep(1)
+
+        if (
+            checkpoint.status != "complete"
+            and checkpoint.next_page is None
+            and checkpoint.pages_completed
+        ):
+            # Reanudado sin páginas pendientes: consolidar como completo.
+            checkpoint.status = "complete"
+            save_checkpoint(checkpoint, ckpt_file)
+
+        if checkpoint.status == "complete":
+            logger.info(
+                "Descubrimiento completo: %d items en %d páginas",
+                len(checkpoint.items),
+                len(checkpoint.pages_completed),
+            )
+        else:
+            logger.info(
+                "Descubrimiento pausado: %d items en %d páginas; próxima página: %s",
+                len(checkpoint.items),
+                len(checkpoint.pages_completed),
+                checkpoint.next_page,
+            )
+        return checkpoint
 
     # ------------------------------------------------------------------
     # Detalles
