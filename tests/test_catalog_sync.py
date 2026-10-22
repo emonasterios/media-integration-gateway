@@ -391,3 +391,265 @@ def test_clean_environment() -> None:
     for directory in (repo_root, repo_root / "data"):
         if directory.exists():
             assert not list(directory.glob("*checkpoint*.json"))
+
+
+# ---------------------------------------------------------------------------
+# 6. Sincronización de page_url (PASO 4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_page_url_persisted_on_creation(tmp_path: Path) -> None:
+    """Al crear una fuente nueva, page_url se guarda con el valor de item["url"]"""
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt.json"
+
+    # Ítem con url (URL completa de la página del contenido)
+    items = [
+        {
+            "provider": "cuevana3",
+            "provider_id": "movie-1",
+            "title": "Pelicula Test",
+            "url": "https://cuevana3.io/pelicula/movie-1/",
+            "poster": "https://example.com/poster.jpg",
+            "media_type": "movie",
+            "year": 2023,
+            "category": None,
+        }
+    ]
+
+    ckpt = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        next_page=None,
+        pages_completed=[1],
+        items=items,
+        status="incomplete",
+    )
+
+    added, updated = await persist_page_batch(factory, items, ckpt, checkpoint_path)
+    assert added == 1
+    assert updated == 0
+
+    async with factory() as db:
+        source = (await db.execute(select(Source))).scalars().first()
+    assert source is not None
+    assert source.page_url == "https://cuevana3.io/pelicula/movie-1/"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_page_url_updated_on_existing_source(tmp_path: Path) -> None:
+    """Al actualizar una fuente existente con nuevo item["url"], page_url se actualiza."""
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt.json"
+
+    # Primera carga: crea la fuente con page_url inicial
+    items_v1 = [
+        {
+            "provider": "cuevana3",
+            "provider_id": "movie-1",
+            "title": "Pelicula Test",
+            "url": "https://cuevana3.io/pelicula/movie-1/",
+            "poster": "https://example.com/poster.jpg",
+            "media_type": "movie",
+            "year": 2023,
+            "category": None,
+        }
+    ]
+    ckpt1 = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        next_page=None,
+        pages_completed=[1],
+        items=items_v1,
+        status="incomplete",
+    )
+    await persist_page_batch(factory, items_v1, ckpt1, checkpoint_path)
+
+    # Segunda carga: mismo provider_id pero URL distinta (ej. cambio de dominio/ruta)
+    items_v2 = [
+        {
+            "provider": "cuevana3",
+            "provider_id": "movie-1",
+            "title": "Pelicula Test",
+            "url": "https://nuevo-dominio.io/pelicula/movie-1/",
+            "poster": "https://example.com/poster.jpg",
+            "media_type": "movie",
+            "year": 2023,
+            "category": None,
+        }
+    ]
+    ckpt2 = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        next_page=None,
+        pages_completed=[1],
+        items=items_v2,
+        status="incomplete",
+    )
+    added, updated = await persist_page_batch(factory, items_v2, ckpt2, checkpoint_path)
+    assert added == 0
+    assert updated == 1
+
+    async with factory() as db:
+        source = (await db.execute(select(Source))).scalars().first()
+    assert source.page_url == "https://nuevo-dominio.io/pelicula/movie-1/"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_page_url_preserved_when_incoming_none_or_missing(tmp_path: Path) -> None:
+    """Si el lote entrante no trae url o viene None, page_url preexistente se conserva."""
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt.json"
+
+    # Crear fuente con page_url inicial
+    items_v1 = [
+        {
+            "provider": "cuevana3",
+            "provider_id": "movie-1",
+            "title": "Pelicula Test",
+            "url": "https://original.io/pelicula/movie-1/",
+            "poster": "https://example.com/poster.jpg",
+            "media_type": "movie",
+            "year": 2023,
+            "category": None,
+        }
+    ]
+    ckpt1 = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        next_page=None,
+        pages_completed=[1],
+        items=items_v1,
+        status="incomplete",
+    )
+    await persist_page_batch(factory, items_v1, ckpt1, checkpoint_path)
+
+    # Actualización SIN url en el item
+    items_v2_no_url = [
+        {
+            "provider": "cuevana3",
+            "provider_id": "movie-1",
+            "title": "Pelicula Test Actualizada",
+            # "url" omitido intencionalmente
+            "poster": "https://example.com/poster-new.jpg",
+            "media_type": "movie",
+            "year": 2023,
+            "category": None,
+        }
+    ]
+    ckpt2 = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        next_page=None,
+        pages_completed=[1],
+        items=items_v2_no_url,
+        status="incomplete",
+    )
+    await persist_page_batch(factory, items_v2_no_url, ckpt2, checkpoint_path)
+
+    async with factory() as db:
+        source = (await db.execute(select(Source))).scalars().first()
+    assert source.page_url == "https://original.io/pelicula/movie-1/"
+
+    # Actualización con url = None explícito
+    items_v3_none = [
+        {
+            "provider": "cuevana3",
+            "provider_id": "movie-1",
+            "title": "Pelicula Test v3",
+            "url": None,
+            "poster": "https://example.com/poster-v3.jpg",
+            "media_type": "movie",
+            "year": 2023,
+            "category": None,
+        }
+    ]
+    ckpt3 = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        next_page=None,
+        pages_completed=[1],
+        items=items_v3_none,
+        status="incomplete",
+    )
+    await persist_page_batch(factory, items_v3_none, ckpt3, checkpoint_path)
+
+    async with factory() as db:
+        source = (await db.execute(select(Source))).scalars().first()
+    assert source.page_url == "https://original.io/pelicula/movie-1/"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sync_from_checkpoint_backward_compatibility_no_url(tmp_path: Path) -> None:
+    """Checkpoint antiguo sin campo url en los items no rompe la reconciliacion."""
+    from scripts.sync_catalog import sync_from_checkpoint
+    from src.services.catalog_checkpoint import CatalogCheckpoint, save_checkpoint
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt_old.json"
+
+    # Simular checkpoint antiguo (sin campo 'url' en los items)
+    # Como fue guardado antes de que existiera el campo
+    old_items = [
+        {
+            "provider": "cuevana3",
+            "provider_id": "movie-old",
+            "title": "Pelicula Antigua",
+            # Sin campo 'url' - compatibilidad hacia atras
+            "poster": "https://example.com/old.jpg",
+            "media_type": "movie",
+            "year": 2020,
+            "category": None,
+        }
+    ]
+    old_checkpoint = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        next_page=None,
+        pages_completed=[1, 2, 3],
+        items=old_items,
+        status="complete",
+        stop_reason="natural_end",
+    )
+    save_checkpoint(old_checkpoint, checkpoint_path)
+
+    # Ejecutar reconciliación desde ese checkpoint - no debe fallar.
+    # sync_from_checkpoint usa AsyncSessionLocal; la redirigimos a la BD temporal
+    # para no tocar la base de datos real.
+    with patch("scripts.sync_catalog.AsyncSessionLocal", factory):
+        await sync_from_checkpoint(
+            checkpoint_path,
+            limit=None,
+            dry_run=False,  # Sin dry_run para que se persista
+            allow_large_delete=False,
+            enrich_new=False,
+        )
+
+    # Verificar que la fuente se creó (sin page_url porque no venía en el item)
+    async with factory() as db:
+        source = (await db.execute(select(Source))).scalars().first()
+    assert source is not None
+    assert source.url == "movie-old"
+    assert source.page_url is None  # No había url en el checkpoint antiguo
+
+    await engine.dispose()

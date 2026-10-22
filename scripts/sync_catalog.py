@@ -107,12 +107,16 @@ async def persist_page_batch(
             )
             current = result.first()
             if current:
-                _source, media = current
+                source, media = current
                 media.title = item["title"]
                 media.original_title = item["title"]
                 media.year = item.get("year")
                 if item.get("poster"):
                     media.poster_url = item["poster"]
+                # Actualizar page_url solo si el dato entrante lo trae y no es vacío
+                incoming_page_url = item.get("url")
+                if incoming_page_url:
+                    source.page_url = incoming_page_url
                 updated += 1
             else:
                 media = Media(
@@ -128,6 +132,7 @@ async def persist_page_batch(
                     Source(
                         provider=PROVIDER,
                         url=provider_id,
+                        page_url=item.get("url"),
                         quality="auto",
                         language="es",
                     )
@@ -223,12 +228,16 @@ async def sync_from_checkpoint(
                 provider_id = item["provider_id"]
                 current = existing.get(provider_id)
                 if current:
-                    _source, media = current
+                    source, media = current
                     media.title = item["title"]
                     media.original_title = item["title"]
                     media.year = item.get("year")
                     if item.get("poster"):
                         media.poster_url = item["poster"]
+                    # Actualizar page_url solo si el dato entrante lo trae y no es vacío
+                    incoming_page_url = item.get("url")
+                    if incoming_page_url:
+                        source.page_url = incoming_page_url
                     updated += 1
                 else:
                     media = Media(
@@ -244,6 +253,7 @@ async def sync_from_checkpoint(
                         Source(
                             provider=PROVIDER,
                             url=provider_id,
+                            page_url=item.get("url"),
                             quality="auto",
                             language="es",
                         )

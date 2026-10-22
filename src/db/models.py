@@ -38,6 +38,7 @@ class Source(Base):
     media_id = Column(Integer, ForeignKey("media.id"), nullable=False)
     provider = Column(String, nullable=False)
     url = Column(String, nullable=False)
+    page_url = Column(String, nullable=True)
     quality = Column(String, nullable=True)
     language = Column(String, nullable=True)
 
