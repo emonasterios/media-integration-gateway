@@ -21,9 +21,17 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError
 
-CHECKPOINT_VERSION = 1
+CHECKPOINT_VERSION = 2
 
 CheckpointStatus = Literal["incomplete", "complete"]
+StopReason = Literal[
+    None,
+    "natural_end",
+    "repeated_page",
+    "no_new_items",
+    "max_pages",
+    "interrupted",
+]
 
 
 class CheckpointError(Exception):
@@ -54,6 +62,9 @@ class CatalogCheckpoint(BaseModel):
       ``title``, ``url``, ``poster``, ``category``...), deduplicados por
       ``(provider, provider_id)``.
     - ``status``: estrictamente ``"incomplete"`` o ``"complete"``.
+    - ``stop_reason``: razón de parada (``natural_end``, ``repeated_page``,
+      ``no_new_items``, ``max_pages``, ``interrupted``). Solo ``natural_end``
+      habilita la reconciliación de bajas.
     """
 
     version: int = CHECKPOINT_VERSION
@@ -64,6 +75,7 @@ class CatalogCheckpoint(BaseModel):
     pages_completed: list[int] = Field(default_factory=list)
     items: list[dict] = Field(default_factory=list)
     status: CheckpointStatus = "incomplete"
+    stop_reason: StopReason = None
 
 
 def save_checkpoint(checkpoint: CatalogCheckpoint, target_path: Path | str) -> None:
@@ -133,7 +145,12 @@ def load_checkpoint(target_path: Path | str) -> CatalogCheckpoint:
             f"Checkpoint corrupto (no es un objeto JSON): {target}"
         )
     version = payload.get("version")
-    if version != CHECKPOINT_VERSION:
+    if version == 1:
+        # Retrocompatibilidad: checkpoint v1 sin stop_reason
+        payload = dict(payload)
+        payload["version"] = CHECKPOINT_VERSION
+        payload.setdefault("stop_reason", None)
+    elif version != CHECKPOINT_VERSION:
         raise CheckpointCorruptedError(
             f"Versión de checkpoint incompatible: esperada {CHECKPOINT_VERSION}, "
             f"encontrada {version!r} en {target}"
@@ -156,14 +173,14 @@ def validate_for_reconciliation(
     - Exige ``status == "complete"``; si es ``"incomplete"`` lanza
       :class:`IncompleteSnapshotError` para impedir el borrado masivo basado
       en un snapshot parcial.
+    - Exige ``stop_reason == "natural_end"``; cualquier otro valor
+      (``repeated_page``, ``no_new_items``, ``max_pages``, ``interrupted``,
+      ``None``) lanza :class:`IncompleteSnapshotError` para impedir
+      la reconciliación de bajas sobre snapshots truncados artificialmente.
     - Exige que proveedor y categoría coincidan con los esperados; si no,
       lanza :class:`IncompatibleCheckpointError`.
     """
-    if checkpoint.status != "complete":
-        raise IncompleteSnapshotError(
-            "Snapshot incompleto: prohibido reconciliar con la base de datos "
-            f"(status={checkpoint.status!r}, next_page={checkpoint.next_page!r})"
-        )
+    # Primero validar proveedor y categoría (compatibilidad con tests existentes)
     if checkpoint.provider != expected_provider:
         raise IncompatibleCheckpointError(
             f"Proveedor del checkpoint ({checkpoint.provider!r}) no coincide con "
@@ -173,6 +190,22 @@ def validate_for_reconciliation(
         raise IncompatibleCheckpointError(
             f"Categoría del checkpoint ({checkpoint.category!r}) no coincide con "
             f"la esperada ({expected_category!r})"
+        )
+    # Luego validar completitud y stop_reason
+    if checkpoint.status != "complete":
+        raise IncompleteSnapshotError(
+            "Snapshot incompleto: prohibido reconciliar con la base de datos "
+            f"(status={checkpoint.status!r}, next_page={checkpoint.next_page!r})"
+        )
+    # Aceptar parada natural explícita (natural_end) o compatibilidad v1/legacy:
+    # next_page=None con stop_reason=None indica fin natural sin marcar explícitamente
+    if not (
+        checkpoint.stop_reason == "natural_end"
+        or (checkpoint.next_page is None and checkpoint.stop_reason is None)
+    ):
+        raise IncompleteSnapshotError(
+            "Snapshot con parada no natural: prohibido reconciliar bajas "
+            f"(stop_reason={checkpoint.stop_reason!r}, next_page={checkpoint.next_page!r})"
         )
 
 

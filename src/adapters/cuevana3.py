@@ -9,7 +9,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 from urllib.parse import urljoin
 
 import httpx
@@ -108,6 +108,11 @@ class Cuevana3Adapter(MediaProvider):
                 m = re.search(r"\b(19|20)\d{2}\b", year_el.get_text())
                 year = int(m.group(0)) if m else None
 
+            # Normalización de título: si el texto plano comienza con el
+            # mismo año del ítem (ej. "2018Aquaman"), recortar el prefijo;
+            # si el prefijo numérico no coincide con el año, no alterarlo.
+            title = self._normalize_title_with_year(title_text, year)
+
             # Imagen: figure.Objf img
             img_el = post.select_one("figure.Objf img") or post.find("img")
             poster_url = None
@@ -202,6 +207,11 @@ class Cuevana3Adapter(MediaProvider):
                     m = re.search(r"\b(19|20)\d{2}\b", year_el.get_text())
                     year = int(m.group(0)) if m else None
 
+                # Normalización de título: si el texto plano comienza con el
+                # mismo año del ítem (ej. "2018Aquaman"), recortar el prefijo;
+                # si el prefijo numérico no coincide con el año, no alterarlo.
+                title = self._normalize_title_with_year(title_text, year)
+
                 img_el = post.select_one("figure.Objf img") or post.find("img")
                 poster_url = None
                 if img_el:
@@ -253,6 +263,10 @@ class Cuevana3Adapter(MediaProvider):
         checkpoint_path: Path | str,
         category: Optional[str] = None,
         page_limit: Optional[int] = None,
+        on_page: Optional[
+            Callable[[list[dict], CatalogCheckpoint], Awaitable[None]]
+        ] = None,
+        no_new_pages_threshold: int = 3,
     ) -> CatalogCheckpoint:
         """Descubre el catálogo página a página con checkpoint duradero.
 
@@ -266,6 +280,21 @@ class Cuevana3Adapter(MediaProvider):
         checkpoint de forma atómica con ``save_checkpoint``. Un fallo de red
         no recuperable propaga :class:`CatalogCrawlError` dejando íntegro en
         disco el último checkpoint guardado.
+
+        Terminación del rastreo: solo el fin natural (la página actual no
+        tiene enlace ``next`` en el DOM) marca ``status="complete"`` con
+        ``stop_reason="natural_end"``. Cualquier otra parada deja
+        ``status="incomplete"`` con un ``stop_reason`` explícito:
+        ``repeated_page`` (la huella de identidades ``(provider,
+        provider_id)`` de la página ya apareció en esta corrida),
+        ``no_new_items`` (``no_new_pages_threshold`` páginas consecutivas
+        sin ningún ``provider_id`` nuevo) o ``max_pages`` (se alcanzó el
+        fusible ``page_limit``). Estas paradas artificiales jamás habilitan
+        la reconciliación de bajas contra la base de datos.
+
+        Si se provee ``on_page`` (corutina), se espera su resultado tras
+        procesar y validar cada página, con los ítems parseados de la página
+        y el checkpoint actualizado, justo antes de persistir en disco.
         """
         path = "/peliculas/" if not category else f"/genero/{category}/"
         ckpt_file = Path(checkpoint_path)
@@ -324,14 +353,20 @@ class Cuevana3Adapter(MediaProvider):
 
         page = (max(checkpoint.pages_completed) + 1) if checkpoint.pages_completed else 1
         visited_pages: set[str] = set()
+        # Heurísticas de terminación artificial: viven solo en esta corrida.
+        seen_page_ids: set[frozenset[tuple[str, str]]] = set()
+        pages_without_new = 0
 
         while page_path:
             if page_limit is not None and len(checkpoint.pages_completed) >= page_limit:
                 logger.info(
-                    "Límite de %d páginas alcanzado; el checkpoint queda "
-                    "incomplete para reanudar más tarde",
+                    "Fusible de %d páginas alcanzado; el checkpoint queda "
+                    "incomplete con stop_reason=max_pages para reanudar más tarde",
                     page_limit,
                 )
+                checkpoint.status = "incomplete"
+                checkpoint.stop_reason = "max_pages"
+                save_checkpoint(checkpoint, ckpt_file)
                 break
 
             absolute_page = urljoin(f"{self._base}/", page_path)
@@ -388,6 +423,11 @@ class Cuevana3Adapter(MediaProvider):
                     m = re.search(r"\b(19|20)\d{2}\b", year_el.get_text())
                     year = int(m.group(0)) if m else None
 
+                # Normalización de título: si el texto plano comienza con el
+                # mismo año del ítem (ej. "2018Aquaman"), recortar el prefijo;
+                # si el prefijo numérico no coincide con el año, no alterarlo.
+                title = self._normalize_title_with_year(title_text, year)
+
                 img_el = post.select_one("figure.Objf img") or post.find("img")
                 poster_url = None
                 if img_el:
@@ -415,26 +455,72 @@ class Cuevana3Adapter(MediaProvider):
                     }
                 )
 
+            # Huella de identidad de la página: conjunto de (provider, provider_id).
+            # Si una página posterior devuelve exactamente las mismas
+            # identidades, la paginación está en bucle: parada artificial.
+            page_ids = frozenset(
+                (item["provider"], item["provider_id"]) for item in new_items
+            )
+            repeated_page = page_ids in seen_page_ids
+            if not repeated_page:
+                seen_page_ids.add(page_ids)
+
+            total_previo = len(checkpoint.items)
             checkpoint.items = add_items_deduplicated(checkpoint.items, new_items)
+            nuevos_en_pagina = len(checkpoint.items) - total_previo
             checkpoint.pages_completed.append(page)
 
             next_link = soup.select_one("a.next.page-numbers[href]")
             next_href = next_link["href"] if next_link else None
+            stop_reason: Optional[str] = None
             if not next_href:
+                # Fin natural: el DOM ya no ofrece enlace siguiente.
                 checkpoint.next_page = None
                 checkpoint.status = "complete"
+                checkpoint.stop_reason = "natural_end"
             else:
                 checkpoint.next_page = next_href
                 checkpoint.status = "incomplete"
+                if repeated_page:
+                    checkpoint.stop_reason = "repeated_page"
+                    stop_reason = "repeated_page"
+                elif nuevos_en_pagina == 0:
+                    pages_without_new += 1
+                    if pages_without_new >= no_new_pages_threshold:
+                        checkpoint.stop_reason = "no_new_items"
+                        stop_reason = "no_new_items"
+                    else:
+                        checkpoint.stop_reason = None
+                else:
+                    pages_without_new = 0
+                    checkpoint.stop_reason = None
+
+            if on_page is not None:
+                await on_page(new_items, checkpoint)
 
             save_checkpoint(checkpoint, ckpt_file)
-            logger.info(
-                "Página %d: %d items (total acumulado: %d); checkpoint guardado en %s",
-                page,
-                len(posts),
-                len(checkpoint.items),
-                ckpt_file,
-            )
+            if stop_reason is not None:
+                logger.warning(
+                    "Página %d: parada artificial (%s); checkpoint incomplete "
+                    "guardado en %s con %d items",
+                    page,
+                    stop_reason,
+                    ckpt_file,
+                    len(checkpoint.items),
+                )
+            else:
+                logger.info(
+                    "Página %d: %d items (%d nuevos; total acumulado: %d); "
+                    "checkpoint guardado en %s",
+                    page,
+                    len(posts),
+                    nuevos_en_pagina,
+                    len(checkpoint.items),
+                    ckpt_file,
+                )
+
+            if stop_reason is not None:
+                break
 
             if checkpoint.next_page is None:
                 page_path = None
@@ -807,6 +893,22 @@ class Cuevana3Adapter(MediaProvider):
         # Quitar el año del título si está al principio
         title = re.sub(r"^\s*\b(19|20)\d{2}\b\s*", "", text).strip()
         return title, year
+
+    @staticmethod
+    def _normalize_title_with_year(title_text: str, year: Optional[int]) -> str:
+        """Recorta el prefijo de año pegado al título solo si coincide con ``year``.
+
+        Cuevana a veces renderiza el año pegado al título sin separador
+        (ej. ``"2018Aquaman"``). Si el título comienza con el año del ítem
+        se recorta el prefijo (``"2018Aquaman"`` -> ``"Aquaman"``); si el
+        prefijo numérico no coincide con ``year``, el título no se altera.
+        """
+        if year is None:
+            return title_text
+        match = re.match(rf"^{year}\s*(.+)$", title_text)
+        if match:
+            return match.group(1).strip()
+        return title_text
 
     @staticmethod
     def _extract_title(soup) -> Optional[str]:

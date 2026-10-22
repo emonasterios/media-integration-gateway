@@ -364,3 +364,252 @@ async def test_sync_from_checkpoint_matching_category_uses_temp_db(tmp_path: Pat
         assert count == 0
     finally:
         await engine.dispose()
+
+
+@pytest.fixture
+def v1_checkpoint_json() -> dict:
+    """Fixture: checkpoint formato v1 (con version=1, sin stop_reason)."""
+    return {
+        "version": 1,
+        "provider": "cuevana3",
+        "category": "accion",
+        "initial_path": "/peliculas/",
+        "next_page": "/peliculas/page/2/",
+        "pages_completed": [1, 2, 3],
+        "items": [
+            {
+                "provider": "cuevana3",
+                "provider_id": "/pelicula/1/",
+                "title": "Test Movie 1",
+                "url": "https://example.com/1",
+                "poster": "https://example.com/poster1.jpg",
+                "category": "accion",
+                "media_type": "movie",
+            },
+            {
+                "provider": "cuevana3",
+                "provider_id": "/pelicula/2/",
+                "title": "Test Movie 2",
+                "url": "https://example.com/2",
+                "poster": "https://example.com/poster2.jpg",
+                "category": "accion",
+                "media_type": "movie",
+            },
+        ],
+        "status": "complete",
+    }
+
+
+def test_load_checkpoint_v1_format(tmp_path: Path, v1_checkpoint_json: dict) -> None:
+    """Cargar checkpoint formato v1 (sin version ni stop_reason) y comprobar que se carga sin perder páginas ni ítems."""
+    checkpoint_path = tmp_path / "checkpoint_v1.json"
+    checkpoint_path.write_text(json.dumps(v1_checkpoint_json), encoding="utf-8")
+
+    loaded = load_checkpoint(checkpoint_path)
+
+    # Debe actualizar version a la actual
+    assert loaded.version == CHECKPOINT_VERSION
+    assert loaded.provider == "cuevana3"
+    assert loaded.category == "accion"
+    assert loaded.initial_path == "/peliculas/"
+    assert loaded.next_page == "/peliculas/page/2/"
+    assert loaded.pages_completed == [1, 2, 3]
+    assert len(loaded.items) == 2
+    assert loaded.items[0]["provider_id"] == "/pelicula/1/"
+    assert loaded.items[1]["provider_id"] == "/pelicula/2/"
+    # stop_reason debe default a None (compatibilidad v1)
+    assert loaded.stop_reason is None
+    # status debe preservarse
+    assert loaded.status == "complete"
+
+
+def test_validate_for_reconciliation_accepts_natural_end() -> None:
+    """validate_for_reconciliation devuelve True (no lanza) solo con status=complete y stop_reason=natural_end."""
+    checkpoint = CatalogCheckpoint(
+        version=CHECKPOINT_VERSION,
+        provider="cuevana3",
+        category="accion",
+        initial_path="/peliculas/",
+        pages_completed=[1, 2, 3],
+        items=[{"provider": "cuevana3", "provider_id": "/a/", "title": "A"}],
+        status="complete",
+        stop_reason="natural_end",
+    )
+    # No debe lanzar excepción
+    validate_for_reconciliation(checkpoint, expected_provider="cuevana3", expected_category="accion")
+
+
+def test_validate_for_reconciliation_accepts_legacy_natural_end() -> None:
+    """Compatibilidad legacy: next_page=None y stop_reason=None se acepta como fin natural."""
+    checkpoint = CatalogCheckpoint(
+        version=CHECKPOINT_VERSION,
+        provider="cuevana3",
+        category="accion",
+        initial_path="/peliculas/",
+        next_page=None,
+        pages_completed=[1, 2, 3],
+        items=[{"provider": "cuevana3", "provider_id": "/a/", "title": "A"}],
+        status="complete",
+        stop_reason=None,
+    )
+    # No debe lanzar excepción (compatibilidad v1/legacy)
+    validate_for_reconciliation(checkpoint, expected_provider="cuevana3", expected_category="accion")
+
+
+def test_validate_for_reconciliation_rejects_repeated_page() -> None:
+    """validate_for_reconciliation rechaza stop_reason=repeated_page."""
+    checkpoint = CatalogCheckpoint(
+        version=CHECKPOINT_VERSION,
+        provider="cuevana3",
+        category="accion",
+        initial_path="/peliculas/",
+        pages_completed=[1, 2, 3],
+        items=[{"provider": "cuevana3", "provider_id": "/a/", "title": "A"}],
+        status="complete",
+        stop_reason="repeated_page",
+    )
+    with pytest.raises(IncompleteSnapshotError) as exc_info:
+        validate_for_reconciliation(checkpoint, expected_provider="cuevana3", expected_category="accion")
+    assert "parada no natural" in str(exc_info.value)
+    assert "repeated_page" in str(exc_info.value)
+
+
+def test_validate_for_reconciliation_rejects_no_new_items() -> None:
+    """validate_for_reconciliation rechaza stop_reason=no_new_items."""
+    checkpoint = CatalogCheckpoint(
+        version=CHECKPOINT_VERSION,
+        provider="cuevana3",
+        category="accion",
+        initial_path="/peliculas/",
+        pages_completed=[1, 2, 3],
+        items=[{"provider": "cuevana3", "provider_id": "/a/", "title": "A"}],
+        status="complete",
+        stop_reason="no_new_items",
+    )
+    with pytest.raises(IncompleteSnapshotError) as exc_info:
+        validate_for_reconciliation(checkpoint, expected_provider="cuevana3", expected_category="accion")
+    assert "parada no natural" in str(exc_info.value)
+    assert "no_new_items" in str(exc_info.value)
+
+
+def test_validate_for_reconciliation_rejects_max_pages() -> None:
+    """validate_for_reconciliation rechaza stop_reason=max_pages."""
+    checkpoint = CatalogCheckpoint(
+        version=CHECKPOINT_VERSION,
+        provider="cuevana3",
+        category="accion",
+        initial_path="/peliculas/",
+        pages_completed=[1, 2, 3],
+        items=[{"provider": "cuevana3", "provider_id": "/a/", "title": "A"}],
+        status="complete",
+        stop_reason="max_pages",
+    )
+    with pytest.raises(IncompleteSnapshotError) as exc_info:
+        validate_for_reconciliation(checkpoint, expected_provider="cuevana3", expected_category="accion")
+    assert "parada no natural" in str(exc_info.value)
+    assert "max_pages" in str(exc_info.value)
+
+
+def test_validate_for_reconciliation_rejects_interrupted() -> None:
+    """validate_for_reconciliation rechaza stop_reason=interrupted."""
+    checkpoint = CatalogCheckpoint(
+        version=CHECKPOINT_VERSION,
+        provider="cuevana3",
+        category="accion",
+        initial_path="/peliculas/",
+        pages_completed=[1, 2, 3],
+        items=[{"provider": "cuevana3", "provider_id": "/a/", "title": "A"}],
+        status="complete",
+        stop_reason="interrupted",
+    )
+    with pytest.raises(IncompleteSnapshotError) as exc_info:
+        validate_for_reconciliation(checkpoint, expected_provider="cuevana3", expected_category="accion")
+    assert "parada no natural" in str(exc_info.value)
+    assert "interrupted" in str(exc_info.value)
+
+
+def test_validate_for_reconciliation_rejects_incomplete_status() -> None:
+    """validate_for_reconciliation rechaza status=incomplete."""
+    checkpoint = CatalogCheckpoint(
+        version=CHECKPOINT_VERSION,
+        provider="cuevana3",
+        category="accion",
+        initial_path="/peliculas/",
+        next_page="/peliculas/page/2/",
+        pages_completed=[1],
+        items=[{"provider": "cuevana3", "provider_id": "/a/", "title": "A"}],
+        status="incomplete",
+        stop_reason=None,
+    )
+    with pytest.raises(IncompleteSnapshotError) as exc_info:
+        validate_for_reconciliation(checkpoint, expected_provider="cuevana3", expected_category="accion")
+    assert "Snapshot incompleto" in str(exc_info.value)
+    assert "incomplete" in str(exc_info.value)
+
+
+def test_checkpoint_serialization_includes_version_and_stop_reason(tmp_path: Path) -> None:
+    """Verificar que la serialización y guardado del checkpoint persiste version y stop_reason."""
+    checkpoint_path = tmp_path / "checkpoint_serialized.json"
+    checkpoint = CatalogCheckpoint(
+        version=CHECKPOINT_VERSION,
+        provider="cuevana3",
+        category="accion",
+        initial_path="/peliculas/",
+        pages_completed=[1, 2, 3],
+        items=[{"provider": "cuevana3", "provider_id": "/a/", "title": "A"}],
+        status="complete",
+        stop_reason="natural_end",
+    )
+    save_checkpoint(checkpoint, checkpoint_path)
+
+    # Leer el JSON crudo para verificar campos
+    raw = checkpoint_path.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+
+    assert payload["version"] == CHECKPOINT_VERSION
+    assert payload["stop_reason"] == "natural_end"
+    assert payload["status"] == "complete"
+    assert payload["provider"] == "cuevana3"
+    assert payload["category"] == "accion"
+    assert len(payload["pages_completed"]) == 3
+    assert len(payload["items"]) == 1
+
+    # Cargar de nuevo y verificar round-trip
+    loaded = load_checkpoint(checkpoint_path)
+    assert loaded.version == CHECKPOINT_VERSION
+    assert loaded.stop_reason == "natural_end"
+    assert loaded.status == "complete"
+    assert loaded.pages_completed == [1, 2, 3]
+    assert len(loaded.items) == 1
+
+
+def test_checkpoint_serialization_with_stop_reason_none(tmp_path: Path) -> None:
+    """Verificar serialización con stop_reason=None."""
+    checkpoint_path = tmp_path / "checkpoint_none_stop.json"
+    checkpoint = CatalogCheckpoint(
+        version=CHECKPOINT_VERSION,
+        provider="cuevana3",
+        category="accion",
+        initial_path="/peliculas/",
+        next_page=None,
+        pages_completed=[1, 2],
+        items=[{"provider": "cuevana3", "provider_id": "/a/", "title": "A"}],
+        status="complete",
+        stop_reason=None,
+    )
+    save_checkpoint(checkpoint, checkpoint_path)
+
+    raw = checkpoint_path.read_text(encoding="utf-8")
+    payload = json.loads(raw)
+
+    assert payload["version"] == CHECKPOINT_VERSION
+    assert "stop_reason" in payload, "stop_reason debe estar presente en el JSON"
+    assert payload["stop_reason"] is None
+    assert payload["next_page"] is None
+    assert payload["status"] == "complete"
+
+    loaded = load_checkpoint(checkpoint_path)
+    assert loaded.version == CHECKPOINT_VERSION
+    assert loaded.stop_reason is None
+    assert loaded.next_page is None
+    assert loaded.status == "complete"

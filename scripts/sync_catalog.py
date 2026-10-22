@@ -16,9 +16,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.adapters.cuevana3 import Cuevana3Adapter
-from src.db.database import AsyncSessionLocal
+from src.db.database import AsyncSessionLocal, Base, engine
 from src.db.models import Media, Source
 from src.services.catalog_checkpoint import (
     CatalogCheckpoint,
@@ -27,6 +28,7 @@ from src.services.catalog_checkpoint import (
     IncompatibleCheckpointError,
     load_checkpoint,
     validate_for_reconciliation,
+    save_checkpoint,
 )
 
 PROVIDER = "cuevana3"
@@ -39,12 +41,22 @@ async def run_discovery(
     category: str | None,
     page_limit: int | None = None,
 ) -> CatalogCheckpoint:
-    """Ejecuta la fase de descubrimiento con checkpoint duradero."""
+    """Ejecuta la fase de descubrimiento con checkpoint duradero y persistencia por página."""
     print(f"Descubriendo catálogo (checkpoint: {checkpoint_path})...")
+    
+    async def on_page_callback(page_items: list[dict], checkpoint: CatalogCheckpoint) -> None:
+        """Callback invocado tras cada página: persiste el lote y guarda checkpoint."""
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+        session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+        added, updated = await persist_page_batch(session_factory, page_items, checkpoint, checkpoint_path)
+        if added or updated:
+            print(f"  Página: {added} nuevas, {updated} actualizadas; checkpoint guardado")
+    
     checkpoint = await adapter.discover_resumable(
         checkpoint_path=checkpoint_path,
         category=category,
         page_limit=page_limit,
+        on_page=on_page_callback,
     )
     print(
         f"Descubrimiento {'completo' if checkpoint.status == 'complete' else 'pausado'}: "
@@ -62,7 +74,71 @@ def print_checkpoint_status(checkpoint: CatalogCheckpoint) -> None:
     print(f"Páginas completadas: {len(checkpoint.pages_completed)}")
     print(f"Total de ítems descubiertos: {len(checkpoint.items)}")
     print(f"Estado: {checkpoint.status}")
+    print(f"Razón de parada: {checkpoint.stop_reason or 'ninguna'}")
     print(f"Próxima página: {checkpoint.next_page or 'ninguna (final)'}")
+
+
+async def persist_page_batch(
+    session_factory: async_sessionmaker,
+    movies: list[dict],
+    checkpoint: CatalogCheckpoint,
+    checkpoint_path: Path,
+) -> tuple[int, int]:
+    """Persiste un lote de películas de una página en una transacción aislada.
+
+    Hace upsert idempotente por (provider, provider_id) y confirma la transacción.
+    Luego guarda el checkpoint actualizado en disco de forma atómica.
+
+    Returns:
+        tuple[int, int]: (added, updated) conteos de este lote.
+    """
+    added = updated = 0
+    async with session_factory() as db:
+        for item in movies:
+            if item.get("media_type") != "movie":
+                continue
+            provider_id = item["provider_id"]
+            # Buscar por provider + provider_id (url en Source)
+            from sqlalchemy import select
+            result = await db.execute(
+                select(Source, Media)
+                .join(Media, Source.media_id == Media.id)
+                .where(Source.provider == PROVIDER, Source.url == provider_id)
+            )
+            current = result.first()
+            if current:
+                _source, media = current
+                media.title = item["title"]
+                media.original_title = item["title"]
+                media.year = item.get("year")
+                if item.get("poster"):
+                    media.poster_url = item["poster"]
+                updated += 1
+            else:
+                media = Media(
+                    title=item["title"],
+                    original_title=item["title"],
+                    media_type=item.get("media_type", "movie"),
+                    year=item.get("year"),
+                    poster_url=item.get("poster"),
+                    synopsis=item.get("overview"),
+                    genres=json.dumps(item.get("genres") or []),
+                )
+                media.sources.append(
+                    Source(
+                        provider=PROVIDER,
+                        url=provider_id,
+                        quality="auto",
+                        language="es",
+                    )
+                )
+                db.add(media)
+                added += 1
+        await db.commit()
+
+    # Guardar checkpoint atómicamente tras commit exitoso
+    save_checkpoint(checkpoint, checkpoint_path)
+    return added, updated
 
 
 async def sync_from_checkpoint(
@@ -80,6 +156,9 @@ async def sync_from_checkpoint(
     Barrera estricta: valida que el checkpoint sea completo y compatible
     ANTES de abrir la base de datos. Si no pasa, aborta con código != 0
     y CERO escrituras en BD.
+
+    La reconciliación de bajas y limpieza de huérfanos solo se ejecuta si
+    el checkpoint tiene status='complete' Y stop_reason='natural_end'.
     """
     # 1) Cargar y validar checkpoint (barrera ANTES de BD)
     try:
@@ -108,6 +187,13 @@ async def sync_from_checkpoint(
         delete_enabled = False
         print(f"Limitando escrituras a {limit}; borrados DESHABILITADOS")
 
+    # 3) Reconciliación por lotes usando persist_page_batch
+    session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+    total_added = total_updated = 0
+
+    # Procesar en lotes (páginas) - usamos el callback para persistir por página
+    # Pero aquí el checkpoint ya está completo, así que hacemos todo en una transacción
+    # para mantener compatibilidad. La persistencia por página ocurre durante discover.
     adapter = Cuevana3Adapter() if enrich_new else None
     try:
         async with AsyncSessionLocal() as db:
@@ -166,27 +252,34 @@ async def sync_from_checkpoint(
                     new_media[provider_id] = media
                     added += 1
 
-            if delete_enabled:
-                for provider_id in missing_ids:
-                    source, media = existing[provider_id]
-                    await db.delete(source)
-                    await db.flush()
-                    remaining = await db.scalar(
-                        select(Source.id).where(Source.media_id == media.id).limit(1)
-                    )
-                    if remaining is None:
-                        await db.delete(media)
-                        deleted_media += 1
-                    deleted_sources += 1
+            # FASE DE BAJAS Y HUÉRFANOS - solo si snapshot completo y parada natural
+            if checkpoint.status == "complete" and checkpoint.stop_reason == "natural_end":
+                if delete_enabled:
+                    for provider_id in missing_ids:
+                        source, media = existing[provider_id]
+                        await db.delete(source)
+                        await db.flush()
+                        remaining = await db.scalar(
+                            select(Source.id).where(Source.media_id == media.id).limit(1)
+                        )
+                        if remaining is None:
+                            await db.delete(media)
+                            deleted_media += 1
+                        deleted_sources += 1
 
-            # Limpia residuos si SQLite no aplicó la FK en ejecuciones anteriores.
-            orphan_sources = (
-                await db.execute(
-                    select(Source).where(~Source.media_id.in_(select(Media.id)))
+                # Limpia residuos si SQLite no aplicó la FK en ejecuciones anteriores.
+                orphan_sources = (
+                    await db.execute(
+                        select(Source).where(~Source.media_id.in_(select(Media.id)))
+                    )
+                ).scalars().all()
+                for source in orphan_sources:
+                    await db.delete(source)
+            else:
+                print(
+                    f"Snapshot incompleto o parada por heurística/límite "
+                    f"(razón: {checkpoint.stop_reason}). Bajas deshabilitadas."
                 )
-            ).scalars().all()
-            for source in orphan_sources:
-                await db.delete(source)
 
             if enrich_new and adapter is not None:
                 for index, (provider_id, media) in enumerate(new_media.items(), 1):
@@ -215,7 +308,7 @@ async def sync_from_checkpoint(
             print(
                 f"{action}: {added} nuevas, {updated} actualizadas, "
                 f"{deleted_sources} fuentes retiradas, {deleted_media} medios retirados, "
-                f"{len(orphan_sources)} fuentes huérfanas limpiadas, "
+                f"{len(orphan_sources) if 'orphan_sources' in locals() else 0} fuentes huérfanas limpiadas, "
                 f"{enriched} enriquecidas, {errors} errores"
             )
     finally:

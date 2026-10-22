@@ -1,0 +1,393 @@
+"""Pruebas de sincronización incremental e idempotencia del catálogo.
+
+Cubre la persistencia por página, la reanudación/replay sin duplicados, la
+normalización de títulos con año pegado y las condiciones de parada del
+crawler (página repetida, N páginas sin novedades y límite de páginas),
+verificando que ninguna parada artificial habilita bajas.
+
+Todas las pruebas usan SQLite en memoria o archivos en ``tmp_path``; nunca
+tocan ``data/gateway.db`` ni dejan checkpoints en el directorio de trabajo.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from src.adapters.cuevana3 import Cuevana3Adapter
+from src.db.database import Base
+from src.db.models import Media, Source
+from src.services.catalog_checkpoint import (
+    CatalogCheckpoint,
+    IncompleteSnapshotError,
+    save_checkpoint,
+    validate_for_reconciliation,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _page_html(items: list[tuple[str, str, int | None]], next_href: str | None) -> str:
+    """Construye el HTML de una página de catálogo.
+
+    ``items`` es una lista de ``(title, href, year)``. ``next_href`` es el
+    enlace ``a.next.page-numbers`` (``None`` para el fin natural).
+    """
+    posts = []
+    for title, href, year in items:
+        year_span = f'<span class="Year">{year}</span>' if year is not None else ""
+        posts.append(
+            f'<div class="TPost"><a href="{href}">{title}</a>'
+            f'<figure class="Objf"><img src="https://example.com/poster.jpg"></figure>'
+            f"{year_span}</div>"
+        )
+    body = "".join(posts)
+    if next_href:
+        body += f'<a class="next page-numbers" href="{next_href}">Siguiente</a>'
+    return f"<html><body>{body}</body></html>"
+
+
+def _build_pages(
+    page_items: list[list[tuple[str, str, int | None]]],
+    next_links: list[str | None],
+) -> dict[str, str]:
+    """Construye un mapa ``page_path -> html`` para el cliente simulado."""
+    pages: dict[str, str] = {}
+    for i, (items, nxt) in enumerate(zip(page_items, next_links), start=1):
+        path = "/peliculas/" if i == 1 else f"/peliculas/page/{i}/"
+        pages[path] = _page_html(items, nxt)
+    return pages
+
+
+class _FakeResponse:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeClient:
+    """Cliente HTTP simulado que sirve páginas por ruta."""
+
+    def __init__(self, pages: dict[str, str]) -> None:
+        self.pages = pages
+        self.requests: list[str] = []
+
+    async def get(self, page_path: str) -> _FakeResponse:
+        self.requests.append(page_path)
+        return _FakeResponse(self.pages[page_path])
+
+
+async def _make_db(db_path: Path):
+    """Crea un motor SQLite temporal con el esquema completo."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    return engine, factory
+
+
+def _movie_item(provider_id: str, title: str, year: int | None = None) -> dict:
+    """Construye un ítem de catálogo tipo película."""
+    return {
+        "provider": "cuevana3",
+        "provider_id": provider_id,
+        "title": title,
+        "url": f"https://example.com/pelicula/{provider_id}/",
+        "poster": "https://example.com/poster.jpg",
+        "media_type": "movie",
+        "year": year,
+        "category": None,
+    }
+
+
+async def _counts(factory) -> tuple[int, int]:
+    """Devuelve (n_media, n_sources) en la BD temporal."""
+    async with factory() as db:
+        media = await db.scalar(select(func.count()).select_from(Media))
+        sources = await db.scalar(select(func.count()).select_from(Source))
+    return int(media or 0), int(sources or 0)
+
+
+# ---------------------------------------------------------------------------
+# 1. Persistencia incremental por página
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_incremental_upsert_per_page(tmp_path: Path) -> None:
+    """Tras la página 1 las películas ya están confirmadas antes de la página 2."""
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt.json"
+
+    page1 = [
+        ("Pelicula Uno", "/pelicula/uno/", 2020),
+        ("Pelicula Dos", "/pelicula/dos/", 2021),
+    ]
+    page2 = [
+        ("Pelicula Tres", "/pelicula/tres/", 2022),
+        ("Pelicula Cuatro", "/pelicula/cuatro/", 2023),
+    ]
+    pages = _build_pages(
+        [page1, page2],
+        ["/peliculas/page/2/", None],
+    )
+    adapter = Cuevana3Adapter()
+    adapter._client = _FakeClient(pages)
+
+    page1_confirmed_before_page2 = False
+
+    async def on_page(items, checkpoint) -> None:
+        await persist_page_batch(factory, items, checkpoint, checkpoint_path)
+        if checkpoint.pages_completed == [1]:
+            # La página 1 ya debe estar confirmada en la BD antes de la página 2.
+            media, _ = await _counts(factory)
+            assert media == len(page1)
+            nonlocal page1_confirmed_before_page2
+            page1_confirmed_before_page2 = True
+
+    try:
+        with patch("src.adapters.cuevana3.asyncio.sleep", new=AsyncMock(return_value=None)):
+            checkpoint = await adapter.discover_resumable(
+                checkpoint_path=checkpoint_path,
+                on_page=on_page,
+            )
+    finally:
+        await engine.dispose()
+
+    assert page1_confirmed_before_page2 is True
+    assert checkpoint.status == "complete"
+    assert checkpoint.stop_reason == "natural_end"
+    media, sources = await _counts(factory)
+    assert media == 4
+    assert sources == 4
+
+
+# ---------------------------------------------------------------------------
+# 2. Reanudación y replay idempotente
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resume_and_replay_idempotency(tmp_path: Path) -> None:
+    """Reanudar o repetir una página no duplica registros en Media ni Source."""
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt.json"
+
+    page1 = [
+        ("Pelicula Uno", "/pelicula/uno/", 2020),
+        ("Pelicula Dos", "/pelicula/dos/", 2021),
+    ]
+    page2 = [
+        ("Pelicula Tres", "/pelicula/tres/", 2022),
+    ]
+    page1_items = [
+        _movie_item("uno", "Pelicula Uno", 2020),
+        _movie_item("dos", "Pelicula Dos", 2021),
+    ]
+    page2_items = [_movie_item("tres", "Pelicula Tres", 2022)]
+
+    # --- Primera corrida: página 1 persistida, luego parada artificial. ---
+    ckpt1 = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        next_page="/peliculas/page/2/",
+        pages_completed=[1],
+        items=page1_items,
+        status="incomplete",
+    )
+    await persist_page_batch(factory, page1_items, ckpt1, checkpoint_path)
+    save_checkpoint(ckpt1, checkpoint_path)
+
+    # --- Reanudación: solo se procesa la página 2 (next_page del checkpoint). ---
+    pages = {"/peliculas/page/2/": _page_html(page2, None)}
+    adapter = Cuevana3Adapter()
+    adapter._client = _FakeClient(pages)
+
+    try:
+        with patch("src.adapters.cuevana3.asyncio.sleep", new=AsyncMock(return_value=None)):
+            checkpoint = await adapter.discover_resumable(
+                checkpoint_path=checkpoint_path,
+                on_page=lambda items, ckpt: persist_page_batch(factory, items, ckpt, checkpoint_path),
+            )
+    finally:
+        await engine.dispose()
+
+    assert checkpoint.status == "complete"
+    assert checkpoint.stop_reason == "natural_end"
+    media, sources = await _counts(factory)
+    assert media == 3
+    assert sources == 3
+
+    # --- Replay: repetir la carga de la misma página no duplica nada. ---
+    replay_dir = tmp_path / "replay"
+    replay_dir.mkdir()
+    engine2, factory2 = await _make_db(replay_dir / "replay.db")
+    try:
+        ckpt_replay = CatalogCheckpoint(
+            provider="cuevana3",
+            category=None,
+            initial_path="/peliculas/",
+            next_page=None,
+            pages_completed=[1],
+            items=[_movie_item("uno", "Pelicula Uno", 2020)],
+            status="incomplete",
+        )
+        added1, _ = await persist_page_batch(factory2, page1_items, ckpt_replay, tmp_path / "replay.json")
+        added2, _ = await persist_page_batch(factory2, page1_items, ckpt_replay, tmp_path / "replay.json")
+        assert added1 == len(page1_items)
+        assert added2 == 0  # segunda carga: todo actualizado, nada nuevo
+        media, sources = await _counts(factory2)
+        assert media == len(page1_items)
+        assert sources == len(page1_items)
+    finally:
+        await engine2.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 3. Normalización de títulos con año pegado
+# ---------------------------------------------------------------------------
+
+
+def test_title_normalization() -> None:
+    """Un ítem con año 2018 y título '2018Aquaman' se persiste como 'Aquaman';
+    '2020Aquaman' con año 2018 no se altera."""
+    # Regla implementada por _normalize_title_with_year.
+    assert Cuevana3Adapter._normalize_title_with_year("2018Aquaman", 2018) == "Aquaman"
+    assert Cuevana3Adapter._normalize_title_with_year("2020Aquaman", 2018) == "2020Aquaman"
+
+
+@pytest.mark.asyncio
+async def test_title_normalization_persisted(tmp_path: Path) -> None:
+    """El título normalizado llega a la BD a través del flujo de descubrimiento."""
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt.json"
+
+    # "2018Aquaman" con span.Year=2018 -> debe persistirse como "Aquaman".
+    pages = _build_pages(
+        [[("2018Aquaman", "/pelicula/aquaman/", 2018)]],
+        [None],
+    )
+    adapter = Cuevana3Adapter()
+    adapter._client = _FakeClient(pages)
+
+    try:
+        with patch("src.adapters.cuevana3.asyncio.sleep", new=AsyncMock(return_value=None)):
+            checkpoint = await adapter.discover_resumable(
+                checkpoint_path=checkpoint_path,
+                on_page=lambda items, ckpt: persist_page_batch(factory, items, ckpt, checkpoint_path),
+            )
+    finally:
+        await engine.dispose()
+
+    assert checkpoint.items[0]["title"] == "Aquaman"
+    async with factory() as db:
+        media = (await db.execute(select(Media))).scalars().first()
+    assert media is not None
+    assert media.title == "Aquaman"
+
+
+# ---------------------------------------------------------------------------
+# 4. Condiciones de parada del crawler
+# ---------------------------------------------------------------------------
+
+
+async def _run_discover(pages: dict[str, str], page_limit: int | None = None):
+    """Ejecuta discover_resumable con un cliente simulado y sin delays."""
+    adapter = Cuevana3Adapter()
+    adapter._client = _FakeClient(pages)
+    checkpoint_path = Path("/tmp") / "test_catalog_sync_stop.json"
+    try:
+        with patch("src.adapters.cuevana3.asyncio.sleep", new=AsyncMock(return_value=None)):
+            return await adapter.discover_resumable(
+                checkpoint_path=checkpoint_path,
+                page_limit=page_limit,
+            )
+    finally:
+        checkpoint_path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_conditions_repeated_page() -> None:
+    """Página repetida detiene el crawler con stop_reason='repeated_page'."""
+    page1 = [("A", "/pelicula/a/", 2020), ("B", "/pelicula/b/", 2021)]
+    page2 = [("A", "/pelicula/a/", 2020), ("B", "/pelicula/b/", 2021)]
+    pages = _build_pages([page1, page2], ["/peliculas/page/2/", "/peliculas/page/3/"])
+
+    checkpoint = await _run_discover(pages)
+
+    assert checkpoint.status == "incomplete"
+    assert checkpoint.stop_reason == "repeated_page"
+    # Jamás apto para bajas: la reconciliación debe rechazarlo.
+    with pytest.raises(IncompleteSnapshotError):
+        validate_for_reconciliation(checkpoint, expected_provider="cuevana3")
+
+
+@pytest.mark.asyncio
+async def test_stop_conditions_no_new_items() -> None:
+    """N páginas sin novedades detienen el crawler con stop_reason='no_new_items'."""
+    # Página 1 introduce A,B,C. Las páginas 2-4 solo reordenan subconjuntos
+    # ya vistos (sin ítems nuevos y sin repetir la huella exacta de una página).
+    page1 = [("A", "/pelicula/a/", 2020), ("B", "/pelicula/b/", 2021), ("C", "/pelicula/c/", 2022)]
+    page2 = [("A", "/pelicula/a/", 2020), ("B", "/pelicula/b/", 2021)]
+    page3 = [("A", "/pelicula/a/", 2020), ("C", "/pelicula/c/", 2022)]
+    page4 = [("B", "/pelicula/b/", 2021), ("C", "/pelicula/c/", 2022)]
+    pages = _build_pages(
+        [page1, page2, page3, page4],
+        ["/peliculas/page/2/", "/peliculas/page/3/", "/peliculas/page/4/", "/peliculas/page/5/"],
+    )
+
+    checkpoint = await _run_discover(pages)
+
+    assert checkpoint.status == "incomplete"
+    assert checkpoint.stop_reason == "no_new_items"
+    with pytest.raises(IncompleteSnapshotError):
+        validate_for_reconciliation(checkpoint, expected_provider="cuevana3")
+
+
+@pytest.mark.asyncio
+async def test_stop_conditions_max_pages() -> None:
+    """El fusible max_pages detiene el crawler con stop_reason='max_pages'."""
+    page1 = [("A", "/pelicula/a/", 2020)]
+    page2 = [("B", "/pelicula/b/", 2021)]
+    page3 = [("C", "/pelicula/c/", 2022)]
+    pages = _build_pages(
+        [page1, page2, page3],
+        ["/peliculas/page/2/", "/peliculas/page/3/", "/peliculas/page/4/"],
+    )
+
+    checkpoint = await _run_discover(pages, page_limit=2)
+
+    assert checkpoint.status == "incomplete"
+    assert checkpoint.stop_reason == "max_pages"
+    assert checkpoint.pages_completed == [1, 2]
+    with pytest.raises(IncompleteSnapshotError):
+        validate_for_reconciliation(checkpoint, expected_provider="cuevana3")
+
+
+# ---------------------------------------------------------------------------
+# 5. Entorno limpio
+# ---------------------------------------------------------------------------
+
+
+def test_clean_environment() -> None:
+    """El test no deja data/gateway.db ni checkpoints en el directorio de trabajo."""
+    repo_root = Path(__file__).resolve().parent.parent
+    assert not (repo_root / "data" / "gateway.db").exists()
+    for directory in (repo_root, repo_root / "data"):
+        if directory.exists():
+            assert not list(directory.glob("*checkpoint*.json"))

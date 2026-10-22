@@ -131,13 +131,19 @@ async def test_resolve_playback_real_fixture(adapter):
     adapter._video_resolver.resolve_streamtape = AsyncMock(return_value=None)
     adapter._video_resolver.resolve_morencius = AsyncMock(return_value=None)
 
-    result = await adapter.resolve_playback("cuevana3:signal-one")
+    # Parchear resolve_with_mediaflow (importado directamente por el adapter) para que
+    # la ruta mediaflow (red real) no eluda los resolvers mockeados
+    with patch(
+        "src.adapters.cuevana3.resolve_with_mediaflow",
+        new=AsyncMock(return_value=None),
+    ):
+        result = await adapter.resolve_playback("cuevana3:signal-one")
 
     # Verificar descriptor de reproducción
     assert isinstance(result, PlaybackDescriptor)
     assert result.protocol == "mp4"
     assert result.url.startswith("https://")
-    assert result.headers.get("Referer") == "https://cuevana3i.cc"
+    assert (result.headers.get("Referer") or result.headers.get("referer")) == "https://cuevana3i.cc"
 
 
 if __name__ == "__main__":

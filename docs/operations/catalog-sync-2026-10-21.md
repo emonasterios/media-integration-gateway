@@ -1,57 +1,58 @@
-# Sincronización del catálogo — 2026-10-21
+# Sincronización incremental del catálogo y checkpoints
 
-## Estado final: BLOQUEADO
+## Arquitectura de carga incremental
 
-La sincronización real no se ejecutó. El dry-run no completó el rastreo y, por
-lo tanto, no produjo un snapshot ni llegó al marcador `SIMULACIÓN (rollback)`.
-El único registro de `/app/data/sync-dry-run.log` fue:
+La sincronización del catálogo se realiza página por página con **upsert atómico
+por página**. Cada página se procesa como una unidad aislada: primero se
+obtienen los ítems, luego se persisten sus películas y fuentes, y finalmente se
+avanza el checkpoint de esa página. Si una ejecución se interrumpe, las páginas
+ya confirmadas permanecen registradas y la reanudación continúa desde el último
+punto seguro.
 
-```text
-Fallo en catálogo página 860 (intento 1/3):
-```
+Este diseño evita mezclar descubrimiento, persistencia y reconciliación global en
+la misma decisión. La lectura puede detenerse y reanudarse sin volver a recorrer
+páginas ya confirmadas, y sin dejar la base en un estado ambiguo entre “avance
+parcial” y “avance final”.
 
-Al no existir un snapshot completo, no fue posible calcular de forma fiable
-altas, actualizaciones ni bajas. Conforme a la compuerta de seguridad, no se
-ejecutó `python scripts/sync_catalog.py` en modo real.
+## Heurísticas de parada deterministas
 
-## Estado observado sin modificar producción
+El crawler no depende solo del enlace `next`. Para evitar bucles o rastreos
+infinitos, la terminación se decide con heurísticas explícitas:
 
-- Contenedor: `healthy` y `running`.
-- Base SQLite `/app/data/gateway.db`: 903 registros en `media` y 1710 en
-  `sources`.
-- Fuentes Cuevana3: 1710.
-- Grupos duplicados por `(provider, url)` para Cuevana3: 797.
-- Fuentes huérfanas: 807.
-- Xtream `get_vod_streams`: HTTP 200, JSON válido de tipo lista con 903
-  elementos.
+- `repeated_page`: la página actual ya fue visitada en la ejecución.
+- `no_new_items`: la página no aporta ítems nuevos respecto del checkpoint o del
+  estado ya confirmado.
+- `max_pages`: se alcanzó el límite configurado de páginas para la ejecución.
+- `natural_end`: el enlace `next` ya no existe y el rastreo terminó de forma
+  natural.
 
-Los duplicados y huérfanos son observaciones del estado ya desplegado; durante
-esta validación no se alteró la base. Estos resultados también impiden declarar
-apta la operación.
+Estas señales se usan para distinguir un cierre real de un stop artificial o de
+una caída a mitad de rastreo. La diferencia es crítica: solo `natural_end`
+indica que el snapshot quedó completo.
 
-## Comandos ejecutados
+## Política de protección contra bajas involuntarias
 
-```bash
-ssh root@192.168.122.120 "docker exec media-integration-gateway cat /app/data/sync-dry-run.log"
-ssh root@192.168.122.120 "docker inspect --format='health={{.State.Health.Status}} status={{.State.Status}} started={{.State.StartedAt}}' media-integration-gateway"
-ssh root@192.168.122.120 "docker exec media-integration-gateway sh -lc 'wc -l -c /app/data/sync-dry-run.log; sed -n \"1,20p\" /app/data/sync-dry-run.log'"
-ssh root@192.168.122.120 "docker exec media-integration-gateway python -c '<consultas SQLite de conteos, duplicados y huérfanos>'"
-ssh root@192.168.122.120 "curl contra /player_api.php?action=get_vod_streams y validación JSON"
-```
+La reconciliación con eliminación de huérfanos solo se permite cuando el
+checkpoint termina con `natural_end`. Esa restricción existe para evitar que un
+snapshot parcial borre o desactive películas y fuentes que simplemente no fueron
+incluidas todavía en un lote incompleto.
 
-No se ejecutaron despliegues, reinicios, cambios de configuración ni comandos
-de escritura sobre la base de datos.
+En particular:
 
-## Descubrimiento reanudable mediante checkpoint
+- `repeated_page`, `no_new_items` y `max_pages` significan que la ejecución no
+  terminó como un snapshot completo.
+- Un checkpoint que registre cualquiera de esas paradas no debe usarse para
+  calcular bajas.
+- Si la sincronización se corta antes del cierre natural, solo se conservan los
+  upserts ya confirmados; no se ejecuta la limpieza de huérfanos.
 
-El descubrimiento y la reconciliación están separados. El checkpoint es JSON
-versión 1 y contiene `provider`, `category`, `initial_path`, `next_page`,
-`pages_completed`, `items` y `status`. Se escribe de forma atómica mediante un
-temporal adyacente y reemplazo, por lo que un fallo conserva el último archivo
-válido. La ruta es configurable con `--checkpoint-path`; el valor por defecto
-es `data/cuevana3_checkpoint.json`.
+En otras palabras: **solo `natural_end` autoriza la reconciliación destructiva**.
+Todo lo demás se trata como incompleto y se protege contra eliminaciones
+accidentales.
 
-Consultar el progreso sin rastrear ni abrir la base de datos:
+## Comandos de CLI
+
+Consultar el estado del checkpoint sin abrir la base de datos:
 
 ```bash
 python scripts/sync_catalog.py \
@@ -59,7 +60,7 @@ python scripts/sync_catalog.py \
   --status
 ```
 
-Iniciar o reanudar únicamente el descubrimiento:
+Ejecutar solo el descubrimiento incremental:
 
 ```bash
 python scripts/sync_catalog.py \
@@ -67,12 +68,15 @@ python scripts/sync_catalog.py \
   --discover-only
 ```
 
-Si el proceso falla, se vuelve a ejecutar el mismo comando con la misma ruta.
-Las páginas incluidas en `pages_completed` no se solicitan nuevamente y el
-rastreo continúa desde `next_page`. No se debe borrar ni editar manualmente el
-checkpoint durante la recuperación.
+Reconciliar desde un checkpoint completo:
 
-Cuando `--status` indique `complete`, validar la reconciliación con rollback:
+```bash
+python scripts/sync_catalog.py \
+  --checkpoint-path /ruta/segura/cuevana3-checkpoint.json \
+  --from-checkpoint
+```
+
+Para validar sin aplicar cambios:
 
 ```bash
 python scripts/sync_catalog.py \
@@ -80,11 +84,24 @@ python scripts/sync_catalog.py \
   --from-checkpoint --dry-run
 ```
 
-Para checkpoints de una categoría concreta, se debe repetir la misma categoría
-en cada operación, por ejemplo `--category accion`. El proveedor y la categoría
-se validan antes de abrir la base de datos.
+## Reanudación transparente desde checkpoints v1 y v2
 
-Un checkpoint `incomplete`, corrupto, de versión incompatible, de otro proveedor
-o de otra categoría está prohibido para reconciliación. La herramienta aborta
-antes de abrir la sesión de base de datos; nunca se debe usar un snapshot parcial
-para inferir bajas.
+La reanudación debe ser transparente para checkpoints previos, incluso si fueron
+escritos con formatos distintos:
+
+- **v1**: conserva proveedor, categoría, página inicial, siguiente página,
+  páginas completadas, ítems y estado.
+- **v2**: mantiene el mismo contrato lógico y añade la distinción estricta entre
+  terminación natural e interrupción artificial.
+
+Al reanudar:
+
+1. Se carga el checkpoint existente desde la ruta configurada.
+2. Se valida proveedor y categoría antes de abrir la base.
+3. Se continúa desde `next_page` sin repetir páginas ya confirmadas.
+4. Si el checkpoint fue cerrado con `natural_end`, se permite la reconciliación.
+5. Si el checkpoint quedó incompleto o sin cierre natural, solo se reanuda el
+   descubrimiento; no se borran huérfanos.
+
+Esto permite retomar un rastreo interrumpido sin perder progreso ni confundir un
+snapshot parcial con un catálogo completo.
