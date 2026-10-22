@@ -11,6 +11,11 @@ from mediaflow_proxy.extractors.filelions import FileLionsExtractor
 from mediaflow_proxy.extractors.streamwish import StreamWishExtractor
 from mediaflow_proxy.extractors.base import ExtractorError
 
+from .resolvers.vimeos import VimeosResolver
+from .resolvers.waaw import WaawResolver
+from .resolvers.vidhide import VidhideResolver
+from .resolvers.bysejikuar import BysejikuarResolver
+
 from src.models.catalog import PlaybackDescriptor
 
 logger = logging.getLogger(__name__)
@@ -32,7 +37,10 @@ _EXTRACTOR_MAP = {
     "filelions.to": FileLionsExtractor,
     "filelions.com": FileLionsExtractor,
     "vidhide.com": FileLionsExtractor,
-    "vidhidepro.com": FileLionsExtractor,
+    "vimeos.net": VimeosResolver,
+    "waaw.to": WaawResolver,
+    "vidhidepro.com": VidhideResolver,
+    "bysejikuar.com": BysejikuarResolver,
     "streamwish.to": StreamWishExtractor,
     "streamwish.com": StreamWishExtractor,
     "ajmidyad.sbs": StreamWishExtractor,
