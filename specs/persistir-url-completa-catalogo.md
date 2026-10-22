@@ -36,17 +36,8 @@ sin rediseñar ahora la identidad ni la política de disponibilidad o retiro.
 
 ## ACEPTACION
 
-```bash
 . /home/emon/media-integration-gateway/.venv/bin/activate && pytest -q tests/test_catalog_sync.py tests/test_migrations.py
-```
-
-```bash
-. /home/emon/media-integration-gateway/.venv/bin/activate && python - <<'PY'
-from src.db.models import Source
-assert Source.__table__.columns['page_url'].nullable is True
-assert Source.__table_args__[0].columns.keys() == ['provider', 'url']
-PY
-```
+. /home/emon/media-integration-gateway/.venv/bin/activate && python -c "from src.db.models import Source; assert Source.__table__.columns['page_url'].nullable is True; assert Source.__table_args__[0].columns.keys() == ['provider', 'url']"
 
 PREMISES
 
