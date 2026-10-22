@@ -1,11 +1,12 @@
 """Tests unitarios de modelos y persistencia (SQLite en memoria)."""
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from src.db.models import Base, Media, Source, Favorite, History
-from src.db.database import init_db
+from src.db.database import init_db, engine as app_engine
 
 
 @pytest.fixture()
@@ -19,6 +20,66 @@ def db_session():
         yield session
     finally:
         session.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_foreign_keys_enabled():
+    """Verifica que la app activa PRAGMA foreign_keys en SQLite."""
+    async with app_engine.connect() as conn:
+        result = await conn.execute(text("PRAGMA foreign_keys"))
+        assert result.scalar() == 1
+
+
+@pytest.mark.asyncio
+async def test_source_rejects_missing_media_fk():
+    """Verifica que Source no permite un media_id inexistente."""
+    async with app_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        with pytest.raises(IntegrityError):
+            await conn.execute(
+                Source.__table__.insert().values(
+                    media_id=999999,
+                    provider="provider-fk-test",
+                    url="https://example.com/fk-test",
+                    quality="1080p",
+                    language="es",
+                )
+            )
+
+
+@pytest.mark.asyncio
+async def test_source_rejects_duplicate_provider_url():
+    """Verifica que Source aplica unicidad sobre provider + url."""
+    async with app_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+        result = await conn.execute(
+            Media.__table__.insert().values(
+                title="Duplicate Test",
+                media_type="movie",
+                year=2024,
+            )
+        )
+        media_id = result.inserted_primary_key[0]
+        await conn.execute(
+            Source.__table__.insert().values(
+                media_id=media_id,
+                provider="provider-unique-test",
+                url="https://example.com/shared",
+                quality="1080p",
+                language="es",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await conn.execute(
+                Source.__table__.insert().values(
+                    media_id=media_id,
+                    provider="provider-unique-test",
+                    url="https://example.com/shared",
+                    quality="720p",
+                    language="en",
+                )
+            )
 
 
 class TestInitDB:

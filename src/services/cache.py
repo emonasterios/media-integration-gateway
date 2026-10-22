@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import select, delete
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -109,11 +109,29 @@ class CatalogCache:
             self.db.add(media)
             await self.db.flush()  # Para obtener el ID
 
-        # Sincronizar sources: borrar las antiguas y crear las nuevas
-        await self.db.execute(delete(Source).filter(Source.media_id == media.id))
+        # Sincronizar sources de forma idempotente: si ya existe una fuente con la
+        # combinación (provider, url) para este medio, se actualizan sus campos;
+        # en caso contrario se crea una nueva. Evita IntegrityError por duplicados.
+        # Las fuentes del medio cuya combinación (provider, url) ya no llega en
+        # sources_data se eliminan, manteniendo la sincronización sin duplicados.
+        result = await self.db.execute(select(Source).where(Source.media_id == media.id))
+        existing_sources = {(s.provider, s.url): s for s in result.scalars().all()}
+        incoming_keys = {(src.get("provider"), src.get("url")) for src in sources_data}
+        for key, stale in list(existing_sources.items()):
+            if key not in incoming_keys:
+                await self.db.delete(stale)
+                del existing_sources[key]
         for src in sources_data:
-            source = Source(media_id=media.id, **src)
-            self.db.add(source)
+            key = (src.get("provider"), src.get("url"))
+            existing = existing_sources.get(key)
+            if existing is not None:
+                for k, v in src.items():
+                    if hasattr(existing, k) and k not in ("id", "media_id", "created_at"):
+                        setattr(existing, k, v)
+            else:
+                source = Source(media_id=media.id, **src)
+                self.db.add(source)
+                existing_sources[key] = source
 
         # Capturar el ID antes del commit: con expire_on_commit=True (default),
         # acceder a media.id tras el commit dispara MissingGreenlet

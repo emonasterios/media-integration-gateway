@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, Float, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from src.db.database import Base
@@ -30,6 +30,9 @@ class Media(Base):
 class Source(Base):
     """Modelo para fuentes de contenido multimedia."""
     __tablename__ = "sources"
+    __table_args__ = (
+        UniqueConstraint("provider", "url", name="uq_sources_provider_url"),
+    )
 
     id = Column(Integer, primary_key=True)
     media_id = Column(Integer, ForeignKey("media.id"), nullable=False)

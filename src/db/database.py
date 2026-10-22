@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 
@@ -22,6 +23,18 @@ if database_url.startswith("sqlite:///") and "aiosqlite" not in database_url:
     database_url = database_url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
 
 engine = create_async_engine(database_url, connect_args=connect_args)
+
+
+@event.listens_for(engine.sync_engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):
+    if not database_url.startswith("sqlite"):
+        return
+
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+    finally:
+        cursor.close()
 
 AsyncSessionLocal = async_sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
