@@ -12,6 +12,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from typing import Awaitable, Callable, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -40,6 +41,7 @@ async def run_discovery(
     checkpoint_path: Path,
     category: str | None,
     page_limit: int | None = None,
+    on_page_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
 ) -> CatalogCheckpoint:
     """Ejecuta la fase de descubrimiento con checkpoint duradero y persistencia por página."""
     print(f"Descubriendo catálogo (checkpoint: {checkpoint_path})...")
@@ -51,6 +53,12 @@ async def run_discovery(
         added, updated = await persist_page_batch(session_factory, page_items, checkpoint, checkpoint_path)
         if added or updated:
             print(f"  Página: {added} nuevas, {updated} actualizadas; checkpoint guardado")
+        # Callback de progreso por página (no intrusivo): se invoca tras persistir
+        # el lote y guardar el checkpoint de la página.
+        if on_page_progress is not None:
+            pages_count = len(checkpoint.pages_completed)
+            total_items = len(checkpoint.items)
+            await on_page_progress(pages_count, total_items)
     
     checkpoint = await adapter.discover_resumable(
         checkpoint_path=checkpoint_path,
@@ -336,17 +344,24 @@ async def sync_catalog(
     checkpoint_path: Path | str = DEFAULT_CHECKPOINT_PATH,
     category: str | None = None,
     page_limit: int | None = None,
-) -> None:
+    on_page_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+) -> CatalogCheckpoint:
     """Flujo completo: descubrimiento (con checkpoint) + reconciliación."""
     adapter = Cuevana3Adapter()
     try:
-        checkpoint = await run_discovery(adapter, Path(checkpoint_path), category, page_limit)
+        checkpoint = await run_discovery(
+            adapter,
+            Path(checkpoint_path),
+            category,
+            page_limit,
+            on_page_progress,
+        )
         if checkpoint.status != "complete":
             print(
                 f"Descubrimiento incompleto ({len(checkpoint.pages_completed)} páginas). "
                 f"Use --from-checkpoint {checkpoint_path} para reanudar o reconciliar."
             )
-            return
+            return checkpoint
         await sync_from_checkpoint(
             Path(checkpoint_path),
             limit=limit,
@@ -356,6 +371,7 @@ async def sync_catalog(
             enrich_new=enrich_new,
             expected_category=category,
         )
+        return checkpoint
     finally:
         await adapter.close()
 
