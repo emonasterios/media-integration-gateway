@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -110,6 +111,7 @@ async def persist_page_batch(
         tuple[int, int]: (added, updated) conteos de este lote.
     """
     added = updated = unchanged = 0
+    observed_at = datetime.now(timezone.utc)
     async with session_factory() as db:
         try:
             fingerprint = hashlib.sha256(json.dumps(movies, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -148,7 +150,12 @@ async def persist_page_batch(
                     source, media = current
                     before = (media.title, media.year, media.synopsis, media.poster_url, source.page_url)
                     after = (item["title"], item.get("year"), item.get("overview"), item.get("poster"), item.get("url"))
-                    if before != after:
+                    presence_changed = (
+                        source.catalog_presence != "present"
+                        or source.consecutive_misses != 0
+                        or source.missing_since is not None
+                    )
+                    if before != after or presence_changed:
                         media.title = item["title"]
                         media.original_title = item["title"]
                         media.year = item.get("year")
@@ -159,6 +166,11 @@ async def persist_page_batch(
                         updated += 1
                     else:
                         unchanged += 1
+                    source.catalog_presence = "present"
+                    source.last_seen_at = observed_at
+                    source.last_seen_run_id = run_id if run_id else None
+                    source.missing_since = None
+                    source.consecutive_misses = 0
                 else:
                     media = Media(
                         title=item["title"],
@@ -169,7 +181,20 @@ async def persist_page_batch(
                         poster_url=item.get("poster"),
                         genres=json.dumps(item.get("genres") or []),
                     )
-                    media.sources.append(Source(provider=PROVIDER, url=provider_id, page_url=item.get("url"), quality="auto", language="es"))
+                    media.sources.append(
+                        Source(
+                            provider=PROVIDER,
+                            url=provider_id,
+                            page_url=item.get("url"),
+                            quality="auto",
+                            language="es",
+                            catalog_presence="present",
+                            last_seen_at=observed_at,
+                            last_seen_run_id=run_id if run_id else None,
+                            missing_since=None,
+                            consecutive_misses=0,
+                        )
+                    )
                     db.add(media)
                     added += 1
             if page_row is not None:
@@ -208,6 +233,7 @@ async def sync_from_checkpoint(
     allow_large_delete: bool = False,
     enrich_new: bool = False,
     expected_category: str | None = None,
+    run_id: str | None = None,
 ) -> None:
     """Reconcilia el catálogo desde un checkpoint en disco.
 
@@ -253,6 +279,7 @@ async def sync_from_checkpoint(
     # Pero aquí el checkpoint ya está completo, así que hacemos todo en una transacción
     # para mantener compatibilidad. La persistencia por página ocurre durante discover.
     adapter = Cuevana3Adapter() if enrich_new else None
+    observed_at = datetime.now(timezone.utc)
     try:
         async with AsyncSessionLocal() as db:
             rows = (
@@ -291,6 +318,11 @@ async def sync_from_checkpoint(
                     incoming_page_url = item.get("url")
                     if incoming_page_url:
                         source.page_url = incoming_page_url
+                    source.catalog_presence = "present"
+                    source.last_seen_at = observed_at
+                    source.last_seen_run_id = run_id if run_id else None
+                    source.missing_since = None
+                    source.consecutive_misses = 0
                     updated += 1
                 else:
                     media = Media(
@@ -309,6 +341,11 @@ async def sync_from_checkpoint(
                             page_url=item.get("url"),
                             quality="auto",
                             language="es",
+                            catalog_presence="present",
+                            last_seen_at=observed_at,
+                            last_seen_run_id=run_id if run_id else None,
+                            missing_since=None,
+                            consecutive_misses=0,
                         )
                     )
                     db.add(media)

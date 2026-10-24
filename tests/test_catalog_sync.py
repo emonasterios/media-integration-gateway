@@ -11,6 +11,7 @@ tocan ``data/gateway.db`` ni dejan checkpoints en el directorio de trabajo.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -818,4 +819,135 @@ async def test_resume_from_next_page(tmp_path: Path) -> None:
     assert run.items_inserted == 2
     assert run.pages_completed == 2
     assert len(await _sync_pages(factory, run_id)) == 2
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_persist_page_batch_records_positive_presence(tmp_path: Path) -> None:
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "presence-new.db")
+    checkpoint_path = tmp_path / "presence-new.json"
+    item = _movie_item("presence-new", "Presente", 2026)
+    checkpoint = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        pages_completed=[1],
+        items=[item],
+        status="incomplete",
+    )
+
+    await persist_page_batch(
+        factory, [item], checkpoint, checkpoint_path, run_id="test-run-1"
+    )
+
+    async with factory() as db:
+        source = (await db.execute(select(Source))).scalar_one()
+        assert source.catalog_presence == "present"
+        assert source.last_seen_at is not None
+        assert source.last_seen_run_id == "test-run-1"
+        assert source.missing_since is None
+        assert source.consecutive_misses == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_persist_page_batch_restores_missing_without_metadata_change(
+    tmp_path: Path,
+) -> None:
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "presence-return.db")
+    checkpoint_path = tmp_path / "presence-return.json"
+    item = _movie_item("presence-return", "Regresa", 2026)
+    checkpoint = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        pages_completed=[1],
+        items=[item],
+        status="incomplete",
+    )
+    await persist_page_batch(factory, [item], checkpoint, checkpoint_path)
+    missing_since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    async with factory() as db:
+        source = (await db.execute(select(Source))).scalar_one()
+        source.catalog_presence = "missing"
+        source.missing_since = missing_since
+        source.consecutive_misses = 2
+        await db.commit()
+
+    added, updated = await persist_page_batch(
+        factory, [item], checkpoint, checkpoint_path, run_id="test-run-return"
+    )
+
+    assert (added, updated) == (0, 1)
+    async with factory() as db:
+        source = (await db.execute(select(Source))).scalar_one()
+        assert source.catalog_presence == "present"
+        assert source.last_seen_at is not None
+        assert source.last_seen_run_id == "test-run-return"
+        assert source.missing_since is None
+        assert source.consecutive_misses == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sync_from_checkpoint_records_and_restores_positive_presence(
+    tmp_path: Path,
+) -> None:
+    from scripts.sync_catalog import sync_from_checkpoint
+
+    engine, factory = await _make_db(tmp_path / "presence-checkpoint.db")
+    checkpoint_path = tmp_path / "presence-checkpoint.json"
+    returning = _movie_item("returning", "Regresa", 2025)
+    new_item = _movie_item("new", "Nueva", 2026)
+    checkpoint = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        pages_completed=[1],
+        items=[returning, new_item],
+        status="complete",
+        stop_reason="natural_end",
+    )
+    save_checkpoint(checkpoint, checkpoint_path)
+    async with factory() as db:
+        media = Media(
+            title="Regresa",
+            original_title="Regresa",
+            media_type="movie",
+            year=2025,
+        )
+        media.sources.append(
+            Source(
+                provider="cuevana3",
+                url="returning",
+                page_url=returning["url"],
+                quality="auto",
+                language="es",
+                catalog_presence="missing",
+                missing_since=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                consecutive_misses=2,
+            )
+        )
+        db.add(media)
+        await db.commit()
+
+    with patch("scripts.sync_catalog.AsyncSessionLocal", factory):
+        await sync_from_checkpoint(checkpoint_path, run_id="checkpoint-run")
+
+    async with factory() as db:
+        sources = {
+            source.url: source
+            for source in (await db.execute(select(Source))).scalars().all()
+        }
+        assert set(sources) == {"returning", "new"}
+        for source in sources.values():
+            assert source.catalog_presence == "present"
+            assert source.last_seen_at is not None
+            assert source.last_seen_run_id == "checkpoint-run"
+            assert source.missing_since is None
+            assert source.consecutive_misses == 0
     await engine.dispose()
