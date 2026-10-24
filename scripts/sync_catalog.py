@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Sincroniza un snapshot completo del catálogo con la BD.
 
-Usa (provider, provider_id) como identidad estable. Los borrados solo se
-habilitan con un rastreo completo, sin --limit y dentro del umbral de seguridad.
+Usa (provider, provider_id) como identidad estable. Las ausencias solo se
+reconcilian con un rastreo completo, sin --limit y dentro del umbral de seguridad.
 El enriquecimiento costoso queda separado mediante --enrich-new.
 """
 from __future__ import annotations
@@ -264,12 +264,12 @@ async def sync_from_checkpoint(
     }
     print(f"Snapshot desde checkpoint: {len(snapshot)} películas únicas")
 
-    delete_enabled = limit is None
+    absence_reconciliation_enabled = limit is None
     items = list(snapshot.values())
     if limit is not None:
         items = items[:limit]
-        delete_enabled = False
-        print(f"Limitando escrituras a {limit}; borrados DESHABILITADOS")
+        absence_reconciliation_enabled = False
+        print(f"Limitando escrituras a {limit}; ausencias DESHABILITADAS")
 
     # 3) Reconciliación por lotes usando persist_page_batch
     session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
@@ -292,16 +292,16 @@ async def sync_from_checkpoint(
             existing = {source.url: (source, media) for source, media in rows}
             missing_ids = set(existing) - set(snapshot)
 
-            if delete_enabled and len(existing) >= 10:
+            if absence_reconciliation_enabled and len(existing) >= 10:
                 ratio = len(missing_ids) / len(existing)
                 if ratio > 0.25 and not allow_large_delete:
                     raise RuntimeError(
-                        f"Protección activada: se eliminaría {len(missing_ids)}/"
+                        f"Protección activada: se marcaría ausente {len(missing_ids)}/"
                         f"{len(existing)} ({ratio:.1%}). Revise el snapshot y use "
                         "--allow-large-delete si el cambio es intencional."
                     )
 
-            added = updated = deleted_sources = deleted_media = enriched = errors = 0
+            added = updated = marked_missing = enriched = errors = 0
             new_media: dict[str, Media] = {}
 
             for item in items:
@@ -352,29 +352,17 @@ async def sync_from_checkpoint(
                     new_media[provider_id] = media
                     added += 1
 
-            # FASE DE BAJAS Y HUÉRFANOS - solo si snapshot completo y parada natural
+            # FASE DE AUSENCIAS - solo si snapshot completo y parada natural.
+            # La reconciliación conserva físicamente tanto Source como Media.
             if checkpoint.status == "complete" and checkpoint.stop_reason == "natural_end":
-                if delete_enabled:
+                if absence_reconciliation_enabled:
                     for provider_id in missing_ids:
-                        source, media = existing[provider_id]
-                        await db.delete(source)
-                        await db.flush()
-                        remaining = await db.scalar(
-                            select(Source.id).where(Source.media_id == media.id).limit(1)
-                        )
-                        if remaining is None:
-                            await db.delete(media)
-                            deleted_media += 1
-                        deleted_sources += 1
-
-                # Limpia residuos si SQLite no aplicó la FK en ejecuciones anteriores.
-                orphan_sources = (
-                    await db.execute(
-                        select(Source).where(~Source.media_id.in_(select(Media.id)))
-                    )
-                ).scalars().all()
-                for source in orphan_sources:
-                    await db.delete(source)
+                        source, _media = existing[provider_id]
+                        source.catalog_presence = "missing"
+                        if source.missing_since is None:
+                            source.missing_since = observed_at
+                        source.consecutive_misses = (source.consecutive_misses or 0) + 1
+                        marked_missing += 1
             else:
                 print(
                     f"Snapshot incompleto o parada por heurística/límite "
@@ -407,8 +395,7 @@ async def sync_from_checkpoint(
 
             print(
                 f"{action}: {added} nuevas, {updated} actualizadas, "
-                f"{deleted_sources} fuentes retiradas, {deleted_media} medios retirados, "
-                f"{len(orphan_sources) if 'orphan_sources' in locals() else 0} fuentes huérfanas limpiadas, "
+                f"{marked_missing} fuentes marcadas ausentes, "
                 f"{enriched} enriquecidas, {errors} errores"
             )
     finally:
