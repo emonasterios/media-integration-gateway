@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.adapters.cuevana3 import Cuevana3Adapter
 from src.db.database import Base
-from src.db.models import Media, Source
+from src.db.models import CatalogSyncPage, CatalogSyncRun, Media, Source
 from src.services.catalog_checkpoint import (
     CatalogCheckpoint,
     IncompleteSnapshotError,
@@ -114,6 +114,17 @@ async def _counts(factory) -> tuple[int, int]:
         media = await db.scalar(select(func.count()).select_from(Media))
         sources = await db.scalar(select(func.count()).select_from(Source))
     return int(media or 0), int(sources or 0)
+
+
+async def _sync_run(factory, run_id: str) -> CatalogSyncRun | None:
+    async with factory() as db:
+        return await db.get(CatalogSyncRun, run_id)
+
+
+async def _sync_pages(factory, run_id: str) -> list[CatalogSyncPage]:
+    async with factory() as db:
+        result = await db.execute(select(CatalogSyncPage).where(CatalogSyncPage.run_id == run_id))
+        return list(result.scalars().all())
 
 
 # ---------------------------------------------------------------------------
@@ -658,4 +669,153 @@ async def test_sync_from_checkpoint_backward_compatibility_no_url(tmp_path: Path
     assert source.url == "movie-old"
     assert source.page_url is None  # No había url en el checkpoint antiguo
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_transactional_page_commit(tmp_path: Path) -> None:
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt.json"
+    run_id = "run-commit"
+    async with factory() as db:
+        db.add(CatalogSyncRun(id=run_id, status="running", phase="discovering", checkpoint_path=str(checkpoint_path)))
+        await db.commit()
+
+    items = [_movie_item("m-1", "Pelicula 1", 2024)]
+    checkpoint = CatalogCheckpoint(provider="cuevana3", category=None, initial_path="/peliculas/", next_page=None, pages_completed=[1], items=items, status="incomplete")
+    await persist_page_batch(factory, items, checkpoint, checkpoint_path, run_id=run_id, page_number=1, page_url="/peliculas/", next_page_url=None)
+
+    media, sources = await _counts(factory)
+    assert media == 1
+    assert sources == 1
+    pages = await _sync_pages(factory, run_id)
+    assert len(pages) == 1
+    page = pages[0]
+    assert page.page_number == 1
+    assert page.seen == 1
+    assert page.unique == 1
+    assert page.inserted == 1
+    run = await _sync_run(factory, run_id)
+    assert run is not None
+    assert run.items_seen == 1
+    assert run.items_unique == 1
+    assert run.items_inserted == 1
+    assert run.items_updated == 0
+    assert run.items_unchanged == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rollback_on_failure(tmp_path: Path) -> None:
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt.json"
+    run_id = "run-rollback"
+    async with factory() as db:
+        db.add(CatalogSyncRun(id=run_id, status="running", phase="discovering", checkpoint_path=str(checkpoint_path)))
+        await db.commit()
+
+    items = [_movie_item("m-1", "Pelicula 1", 2024)]
+    checkpoint = CatalogCheckpoint(provider="cuevana3", category=None, initial_path="/peliculas/", next_page=None, pages_completed=[1], items=items, status="incomplete")
+
+    with patch("scripts.sync_catalog.save_checkpoint", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError):
+            await persist_page_batch(factory, items, checkpoint, checkpoint_path, run_id=run_id, page_number=1, page_url="/peliculas/", next_page_url=None)
+
+    media, sources = await _counts(factory)
+    assert media == 1
+    assert sources == 1
+    assert len(await _sync_pages(factory, run_id)) == 1
+    run = await _sync_run(factory, run_id)
+    assert run is not None
+    assert run.items_seen == 1
+    assert not checkpoint_path.exists()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_idempotent_replay(tmp_path: Path) -> None:
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt.json"
+    run_id = "run-replay"
+    async with factory() as db:
+        db.add(CatalogSyncRun(id=run_id, status="running", phase="discovering", checkpoint_path=str(checkpoint_path)))
+        await db.commit()
+
+    items = [_movie_item("m-1", "Pelicula 1", 2024)]
+    checkpoint = CatalogCheckpoint(provider="cuevana3", category=None, initial_path="/peliculas/", next_page=None, pages_completed=[1], items=items, status="incomplete")
+    await persist_page_batch(factory, items, checkpoint, checkpoint_path, run_id=run_id, page_number=1, page_url="/peliculas/", next_page_url=None)
+    before = await _sync_run(factory, run_id)
+    await persist_page_batch(factory, items, checkpoint, checkpoint_path, run_id=run_id, page_number=1, page_url="/peliculas/", next_page_url=None)
+
+    media, sources = await _counts(factory)
+    assert media == 1
+    assert sources == 1
+    run = await _sync_run(factory, run_id)
+    assert run is not None
+    assert run.items_seen == 2
+    assert run.items_unique == 2
+    assert run.items_inserted == 1
+    assert len(await _sync_pages(factory, run_id)) == 1
+    assert before is not None and before.items_seen == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_counters_updated_vs_unchanged(tmp_path: Path) -> None:
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt.json"
+    run_id = "run-counters"
+    async with factory() as db:
+        db.add(CatalogSyncRun(id=run_id, status="running", phase="discovering", checkpoint_path=str(checkpoint_path)))
+        await db.commit()
+
+    base_item = _movie_item("m-1", "Pelicula 1", 2024)
+    checkpoint = CatalogCheckpoint(provider="cuevana3", category=None, initial_path="/peliculas/", next_page=None, pages_completed=[1], items=[base_item], status="incomplete")
+    await persist_page_batch(factory, [base_item], checkpoint, checkpoint_path, run_id=run_id, page_number=1, page_url="/peliculas/", next_page_url=None)
+    same_item = dict(base_item)
+    await persist_page_batch(factory, [same_item], checkpoint, checkpoint_path, run_id=run_id, page_number=2, page_url="/peliculas/page/2/", next_page_url=None)
+    changed_item = dict(base_item)
+    changed_item["title"] = "Pelicula 1 Remaster"
+    await persist_page_batch(factory, [changed_item], checkpoint, checkpoint_path, run_id=run_id, page_number=3, page_url="/peliculas/page/3/", next_page_url=None)
+
+    run = await _sync_run(factory, run_id)
+    assert run is not None
+    assert run.items_unchanged >= 1
+    assert run.items_updated >= 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_resume_from_next_page(tmp_path: Path) -> None:
+    from scripts.sync_catalog import persist_page_batch
+
+    engine, factory = await _make_db(tmp_path / "test.db")
+    checkpoint_path = tmp_path / "ckpt.json"
+    run_id = "run-resume"
+    async with factory() as db:
+        db.add(CatalogSyncRun(id=run_id, status="running", phase="discovering", checkpoint_path=str(checkpoint_path)))
+        await db.commit()
+
+    page1 = [_movie_item("m-1", "Pelicula 1", 2024)]
+    page2 = [_movie_item("m-2", "Pelicula 2", 2025)]
+    checkpoint = CatalogCheckpoint(provider="cuevana3", category=None, initial_path="/peliculas/", next_page="/peliculas/page/2/", pages_completed=[1], items=page1, status="incomplete")
+    await persist_page_batch(factory, page1, checkpoint, checkpoint_path, run_id=run_id, page_number=1, page_url="/peliculas/", next_page_url="/peliculas/page/2/")
+    await persist_page_batch(factory, page2, checkpoint, checkpoint_path, run_id=run_id, page_number=2, page_url="/peliculas/page/2/", next_page_url=None)
+
+    media, sources = await _counts(factory)
+    assert media == 2
+    assert sources == 2
+    run = await _sync_run(factory, run_id)
+    assert run is not None
+    assert run.items_inserted == 2
+    assert run.pages_completed == 2
+    assert len(await _sync_pages(factory, run_id)) == 2
     await engine.dispose()

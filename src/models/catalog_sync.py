@@ -12,22 +12,26 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict
 
 
-class PageSyncResult(BaseModel):
-    """Resultado de la sincronización de una página individual."""
+class CatalogPageSyncResult(BaseModel):
+    """Resultado detallado de una página procesada."""
 
     model_config = ConfigDict(from_attributes=True)
 
     page_number: int
     page_url: str
     next_page_url: Optional[str] = None
-    fingerprint: str
-    seen: int
-    unique: int
-    inserted: int
-    updated: int
-    unchanged: int
-    duplicate_in_run: int
-    rejected: int
+    content_hash: str
+    seen: int = 0
+    unique: int = 0
+    inserted: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    duplicate_in_run: int = 0
+    rejected: int = 0
+
+
+class PageSyncResult(CatalogPageSyncResult):
+    """Compatibilidad con el nombre histórico del resultado de página."""
 
 
 class CatalogSyncRunRead(BaseModel):

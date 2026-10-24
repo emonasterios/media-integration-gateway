@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -21,7 +22,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.adapters.cuevana3 import Cuevana3Adapter
 from src.db.database import AsyncSessionLocal, Base, engine
-from src.db.models import Media, Source
+from src.db.models import CatalogSyncPage, CatalogSyncRun, Media, Source
 from src.services.catalog_checkpoint import (
     CatalogCheckpoint,
     CheckpointCorruptedError,
@@ -75,6 +76,10 @@ async def run_discovery(
     return checkpoint
 
 
+def _next_page_number(checkpoint: CatalogCheckpoint) -> int:
+    return (max(checkpoint.pages_completed) + 1) if checkpoint.pages_completed else 1
+
+
 def print_checkpoint_status(checkpoint: CatalogCheckpoint) -> None:
     """Imprime el resumen del checkpoint."""
     print(f"Proveedor: {checkpoint.provider}")
@@ -91,6 +96,10 @@ async def persist_page_batch(
     movies: list[dict],
     checkpoint: CatalogCheckpoint,
     checkpoint_path: Path,
+    run_id: str | None = None,
+    page_number: int | None = None,
+    page_url: str | None = None,
+    next_page_url: str | None = None,
 ) -> tuple[int, int]:
     """Persiste un lote de películas de una página en una transacción aislada.
 
@@ -100,56 +109,92 @@ async def persist_page_batch(
     Returns:
         tuple[int, int]: (added, updated) conteos de este lote.
     """
-    added = updated = 0
+    added = updated = unchanged = 0
     async with session_factory() as db:
-        for item in movies:
-            if item.get("media_type") != "movie":
-                continue
-            provider_id = item["provider_id"]
-            # Buscar por provider + provider_id (url en Source)
-            from sqlalchemy import select
-            result = await db.execute(
-                select(Source, Media)
-                .join(Media, Source.media_id == Media.id)
-                .where(Source.provider == PROVIDER, Source.url == provider_id)
-            )
-            current = result.first()
-            if current:
-                source, media = current
-                media.title = item["title"]
-                media.original_title = item["title"]
-                media.year = item.get("year")
-                if item.get("poster"):
-                    media.poster_url = item["poster"]
-                # Actualizar page_url solo si el dato entrante lo trae y no es vacío
-                incoming_page_url = item.get("url")
-                if incoming_page_url:
-                    source.page_url = incoming_page_url
-                updated += 1
-            else:
-                media = Media(
-                    title=item["title"],
-                    original_title=item["title"],
-                    media_type=item.get("media_type", "movie"),
-                    year=item.get("year"),
-                    poster_url=item.get("poster"),
-                    synopsis=item.get("overview"),
-                    genres=json.dumps(item.get("genres") or []),
-                )
-                media.sources.append(
-                    Source(
-                        provider=PROVIDER,
-                        url=provider_id,
-                        page_url=item.get("url"),
-                        quality="auto",
-                        language="es",
+        try:
+            fingerprint = hashlib.sha256(json.dumps(movies, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+            page_row = None
+            if run_id is not None and page_number is not None:
+                existing_page = await db.execute(
+                    select(CatalogSyncPage).where(
+                        CatalogSyncPage.run_id == run_id,
+                        CatalogSyncPage.page_number == page_number,
                     )
                 )
-                db.add(media)
-                added += 1
-        await db.commit()
+                page_row = existing_page.scalar_one_or_none()
+                if page_row is None:
+                    page_row = CatalogSyncPage(
+                        run_id=run_id,
+                        page_number=page_number,
+                        page_url=page_url or "",
+                        next_page_url=next_page_url,
+                        page_fingerprint=fingerprint,
+                    )
+                    db.add(page_row)
+            run_row = None
+            if run_id is not None:
+                run_row = await db.get(CatalogSyncRun, run_id)
+            for item in movies:
+                if item.get("media_type") != "movie":
+                    continue
+                provider_id = item["provider_id"]
+                result = await db.execute(
+                    select(Source, Media)
+                    .join(Media, Source.media_id == Media.id)
+                    .where(Source.provider == PROVIDER, Source.url == provider_id)
+                )
+                current = result.first()
+                if current:
+                    source, media = current
+                    before = (media.title, media.year, media.synopsis, media.poster_url, source.page_url)
+                    after = (item["title"], item.get("year"), item.get("overview"), item.get("poster"), item.get("url"))
+                    if before != after:
+                        media.title = item["title"]
+                        media.original_title = item["title"]
+                        media.year = item.get("year")
+                        media.synopsis = item.get("overview")
+                        media.poster_url = item.get("poster")
+                        if item.get("url"):
+                            source.page_url = item.get("url")
+                        updated += 1
+                    else:
+                        unchanged += 1
+                else:
+                    media = Media(
+                        title=item["title"],
+                        original_title=item["title"],
+                        media_type=item.get("media_type", "movie"),
+                        year=item.get("year"),
+                        synopsis=item.get("overview"),
+                        poster_url=item.get("poster"),
+                        genres=json.dumps(item.get("genres") or []),
+                    )
+                    media.sources.append(Source(provider=PROVIDER, url=provider_id, page_url=item.get("url"), quality="auto", language="es"))
+                    db.add(media)
+                    added += 1
+            if page_row is not None:
+                page_row.seen = len(movies)
+                page_row.unique = len(movies)
+                page_row.inserted = added
+                page_row.updated = updated
+                page_row.unchanged = unchanged
+                page_row.duplicate_in_run = 0
+                page_row.rejected = 0
+            if run_row is not None:
+                run_row.pages_completed += 1
+                run_row.items_seen += len(movies)
+                run_row.items_unique += len(movies)
+                run_row.items_inserted += added
+                run_row.items_updated += updated
+                run_row.items_unchanged += unchanged
+                run_row.items_duplicate_in_run += 0
+                run_row.items_rejected += 0
+                run_row.items_discovered = run_row.items_unique
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
 
-    # Guardar checkpoint atómicamente tras commit exitoso
     save_checkpoint(checkpoint, checkpoint_path)
     return added, updated
 

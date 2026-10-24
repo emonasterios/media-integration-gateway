@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from src.db.models import CatalogSyncRun
+from src.db.models import CatalogSyncPage, CatalogSyncRun
 
 
 class ActiveSyncAlreadyRunningError(Exception):
@@ -129,16 +129,66 @@ class CatalogSyncService:
                 await db.commit()
 
         # Callback async de progreso
-        async def on_progress(pages: int, items: int) -> None:
+        async def on_progress(*args, **kwargs) -> None:
             progress_now = datetime.now(timezone.utc)
+            if args and len(args) == 2 and not kwargs and all(isinstance(value, int) for value in args):
+                pages, items = args
+                async with self._session_factory() as db:
+                    result = await db.execute(
+                        select(CatalogSyncRun).where(CatalogSyncRun.id == run_id)
+                    )
+                    run = result.scalar_one_or_none()
+                    if run:
+                        run.pages_completed = pages
+                        run.items_discovered = items
+                        run.last_activity_at = progress_now
+                        await db.commit()
+                return
+
+            progress_result = kwargs.get("result", args[0] if args else None)
+            callback_run_id = kwargs.get("run_id", args[1] if len(args) > 1 else run_id)
+            if progress_result is None or callback_run_id is None:
+                return
+
             async with self._session_factory() as db:
-                result = await db.execute(
-                    select(CatalogSyncRun).where(CatalogSyncRun.id == run_id)
+                run_result = await db.execute(
+                    select(CatalogSyncRun).where(CatalogSyncRun.id == callback_run_id)
                 )
-                run = result.scalar_one_or_none()
+                run = run_result.scalar_one_or_none()
                 if run:
-                    run.pages_completed = pages
-                    run.items_discovered = items
+                    page_exists = await db.execute(
+                        select(CatalogSyncPage).where(
+                            CatalogSyncPage.run_id == callback_run_id,
+                            CatalogSyncPage.page_number == progress_result.page_number,
+                        )
+                    )
+                    if page_exists.scalar_one_or_none() is not None:
+                        return
+                    db.add(
+                        CatalogSyncPage(
+                            run_id=callback_run_id,
+                            page_number=progress_result.page_number,
+                            page_url=progress_result.page_url,
+                            next_page_url=progress_result.next_page_url,
+                            page_fingerprint=progress_result.content_hash,
+                            seen=progress_result.seen,
+                            unique=progress_result.unique,
+                            inserted=progress_result.inserted,
+                            updated=progress_result.updated,
+                            unchanged=progress_result.unchanged,
+                            duplicate_in_run=progress_result.duplicate_in_run,
+                            rejected=progress_result.rejected,
+                        )
+                    )
+                    run.pages_completed = max(run.pages_completed, progress_result.page_number)
+                    run.items_seen += progress_result.seen
+                    run.items_unique += progress_result.unique
+                    run.items_discovered = run.items_unique
+                    run.items_inserted += progress_result.inserted
+                    run.items_updated += progress_result.updated
+                    run.items_unchanged += progress_result.unchanged
+                    run.items_duplicate_in_run += progress_result.duplicate_in_run
+                    run.items_rejected += progress_result.rejected
                     run.last_activity_at = progress_now
                     await db.commit()
 

@@ -115,7 +115,10 @@ class CancellableRunner:
             self.progress_calls.append((page, items))
 
             if progress_callback:
-                await progress_callback(page, items)
+                # Blindar el callback: si el servicio cancela la tarea mientras
+                # el progreso está escribiendo en BD, la cancelación debe llegar
+                # a la frontera del runner y no interrumpir el commit a medias.
+                await asyncio.shield(progress_callback(page, items))
 
     def cancel(self):
         self.cancel_event.set()
@@ -598,6 +601,113 @@ async def test_get_latest_and_get_by_id():
             assert data["id"] == run_id
             assert data["status"] == "completed"
             assert data["active_slot"] is None
+
+    finally:
+        await service.shutdown()
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Compatibilidad con runners simulados: acumulados del último commit vía API
+# ---------------------------------------------------------------------------
+
+
+class GatedRunner:
+    """Runner simulado que emite progreso con la firma posicional legacy
+    (dos enteros, sin run_id) y se pausa tras confirmar una página para
+    permitir verificar el estado expuesto por la API/servicio.
+    """
+
+    def __init__(self, items_per_page: int = 7):
+        self.items_per_page = items_per_page
+        self.gate = asyncio.Event()
+        self.page_confirmed = asyncio.Event()
+        self.progress_calls: list[tuple[int, int]] = []
+
+    async def __call__(
+        self,
+        progress_callback=None,
+        allow_large_delete: bool = False,
+        enrich_new: bool = False,
+    ) -> None:
+        # Página 1: emitida con argumentos posicionales (pages_completed,
+        # items_discovered), sin run_id, igual que los runners reales.
+        items = 1 * self.items_per_page
+        self.progress_calls.append((1, items))
+        if progress_callback:
+            await progress_callback(1, items)
+
+        # Confirmada la página (commit hecho por el servicio), pausar el
+        # runner para congelar el último commit y consultar la API.
+        self.page_confirmed.set()
+        await self.gate.wait()
+
+        # Página 2: nueva emisión para comprobar que los acumulados avanzan
+        # al siguiente commit.
+        items2 = 2 * self.items_per_page
+        self.progress_calls.append((2, items2))
+        if progress_callback:
+            await progress_callback(2, items2)
+
+
+@pytest.mark.asyncio
+async def test_run_status_reflects_last_committed_accumulators():
+    """Tras confirmar una página, la API/servicio devuelve exactamente los
+    acumulados registrados en el último commit, con callback posicional sin
+    run_id (compatibilidad con runners simulados).
+    """
+    engine, factory = await _make_in_memory_db()
+    runner = GatedRunner(items_per_page=7)
+    app, service = await _make_test_app(factory, runner)
+
+    try:
+        async with _test_client(app) as client:
+            response = await client.post("/api/v1/catalog-sync/runs")
+            assert response.status_code == 202
+            run_id = response.json()["id"]
+
+            # Esperar a que el runner confirme la página 1 y se pause
+            await asyncio.wait_for(runner.page_confirmed.wait(), timeout=2.0)
+
+            # Último commit del runner: página 1 con 7 items
+            last_committed = runner.progress_calls[-1]
+            assert last_committed == (1, 7)
+
+            # La API debe reflejar exactamente los acumulados del último commit
+            response = await client.get(f"/api/v1/catalog-sync/runs/{run_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "running"
+            assert data["pages_completed"] == last_committed[0]
+            assert data["items_discovered"] == last_committed[1]
+
+            # Y la BD debe estar sincronizada con lo expuesto por la API
+            async with factory() as db:
+                run = await db.get(CatalogSyncRun, run_id)
+            assert run is not None
+            assert run.pages_completed == data["pages_completed"]
+            assert run.items_discovered == data["items_discovered"]
+
+            # Liberar el runner: la página 2 avanza los acumulados al nuevo commit
+            runner.gate.set()
+            await asyncio.wait_for(
+                service._running_tasks.copy().pop(), timeout=2.0
+            )
+
+            last_committed = runner.progress_calls[-1]
+            assert last_committed == (2, 14)
+
+            response = await client.get(f"/api/v1/catalog-sync/runs/{run_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["pages_completed"] == last_committed[0]
+            assert data["items_discovered"] == last_committed[1]
+
+            # Coherencia final API == BD
+            async with factory() as db:
+                run = await db.get(CatalogSyncRun, run_id)
+            assert run.pages_completed == data["pages_completed"]
+            assert run.items_discovered == data["items_discovered"]
 
     finally:
         await service.shutdown()
