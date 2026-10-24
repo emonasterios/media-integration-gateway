@@ -1,71 +1,75 @@
-<!-- spec:adef235a7c1ef0fb6dc62426caf5770d -->
-# ENCARGO: Reconciliar ausencias sin borrado físico en reconciliación de catálogo — unidad 2B.1
+<!-- spec:db462881fa01ec0685da678b746a6aef -->
+# ENCARGO: Reconciliar ausencias sin borrado físico en el catálogo (Unidad 2B.1)
 
 ## Reglas obligatorias para el ejecutor
 - Leer cada archivo antes de editarlo y tocar SOLO lo necesario.
 - NO reescribir archivos enteros: reescribir reintroduce fallos ya corregidos.
 - No aprovechar para mejorar ni reorganizar nada más.
-- No modificar modelos, migraciones, adapters, API, resolvers, reproducción ni despliegue. Limitar los cambios estrictamente a `scripts/sync_catalog.py` y `tests/test_catalog_sync.py`.
-- No borrar físicamente ninguna fila de `sources` ni de `media` durante la reconciliación.
+- No modificar archivos fuera de `scripts/sync_catalog.py` y `tests/test_catalog_sync.py`.
+- No ejecutar sincronizaciones reales contra producción ni tocar bases de datos reales.
+- El proyecto debe quedar en estado compilable y pasando pruebas tras cada paso.
 
 ---
 
-## PASO 1: Reemplazar el borrado físico por marcado persistente de ausencia en scripts/sync_catalog.py
+## PASO 1: Sustituir el borrado físico por marcado persistente de ausencia en el reconciliador de catálogo
 
-**Archivo a modificar:** `scripts/sync_catalog.py`
+### Archivo a modificar
+- `scripts/sync_catalog.py`
 
-**Instrucciones:**
-1. Leer `scripts/sync_catalog.py` prestando atención a la función `sync_from_checkpoint` (sección entre líneas 280 y 385 aproximadamente, donde se identifican `missing_ids` y se ejecutan las bajas).
-2. Mantener intactas las validaciones previas a la reconciliación de ausencias:
-   - Solo se reconcilian ausencias si el checkpoint es completo y `stop_reason == "natural_end"`.
-   - Si se ejecuta con `--limit`, las ausencias quedan deshabilitadas (`delete_enabled = False` o equivalente).
-   - Mantener el control de cambio masivo: si el porcentaje de ausencias supera el 25% del total de fuentes activas del proveedor y no se pasa `allow_large_delete=True`, abortar con el mismo error existente, antes de marcar ausencias.
-3. Eliminar por completo el borrado físico:
-   - Eliminar las llamadas `await db.delete(source)` y `await db.delete(media)`.
-   - Eliminar la lógica de limpieza de fuentes huérfanas (`orphan_sources` / borrado de huérfanos).
-   - No introducir borrados en cascada ni sentencias SQL DELETE directas.
-4. En lugar de borrar las fuentes ausentes, iterar sobre cada `Source` ausente (`missing_ids`):
-   - Establecer `source.catalog_presence = "missing"`.
-   - Si `source.missing_since is None`, asignar `source.missing_since = observed_at` (si ya tenía valor, preservarlo para mantener la fecha original de la primera ausencia).
-   - Incrementar `source.consecutive_misses = (source.consecutive_misses or 0) + 1`.
-   - Mantener intactos `source.last_seen_at` y `source.last_seen_run_id` (representan la última observación positiva).
-5. Mantener intacto el flujo de fuentes presentes ya existente (donde se establece `catalog_presence = "present"`, `missing_since = None`, `consecutive_misses = 0`, y se actualizan `last_seen_at` y `last_seen_run_id`).
-6. En las variables de conteo y el resumen impreso final:
-   - Reemplazar nombres de contadores de borrado (`sources_deleted`, `media_deleted`) por `sources_marked_missing`.
-   - En el mensaje de resumen por consola, reportar "fuentes marcadas ausentes" (no hablar de fuentes ni medios borrados o retirados; no usar el estado `retired`).
-7. Comprobar que el archivo compila sin errores:
-   `python3 -m py_compile scripts/sync_catalog.py`
+### Instrucciones
+1. Leer `scripts/sync_catalog.py` prestando atención a la función `sync_from_checkpoint` y su bloque de reconciliación de bajas (aproximadamente líneas 290 a 380).
+2. Identificar el punto donde se computa `missing_ids` y la validación del umbral de seguridad por borrado masivo (`allow_large_delete`). Mantener intacto el cálculo de porcentaje y la excepción si se supera el 25% sin `allow_large_delete=True`.
+3. Eliminar por completo el borrado físico de la base de datos:
+   - Eliminar todas las llamadas `await db.delete(source)`.
+   - Eliminar todas las llamadas `await db.delete(media)`.
+   - Eliminar el bloque de limpieza de fuentes huérfanas que hacía `await db.delete(...)`.
+   - Asegurarse de que no quede ninguna llamada `await db.delete` en todo `scripts/sync_catalog.py`.
+4. En lugar de borrar las fuentes correspondientes a `missing_ids`:
+   - Para cada `Source` del proveedor ausente del snapshot:
+     - Asignar `source.catalog_presence = "missing"`.
+     - Si `source.missing_since is None`, asignar `source.missing_since = observed_at` (preservando el valor previo si ya estaba ausente).
+     - Incrementar `source.consecutive_misses = (source.consecutive_misses or 0) + 1`.
+     - Dejar inalterados `last_seen_at` y `last_seen_run_id` (que registran la última observación positiva).
+5. Mantener intacta la lógica de presencia positiva para las fuentes presentes (`catalog_presence = "present"`, `missing_since = None`, `consecutive_misses = 0`, actualización de `last_seen_at` y `last_seen_run_id`).
+6. Ajustar los nombres de contadores y textos de logging/resumen:
+   - Renombrar contadores como `deleted_sources` / `deleted_media` por `marked_missing` o `missing_sources_count`.
+   - Actualizar el mensaje de log final o impresión para reflejar "fuentes marcadas ausentes" en lugar de "eliminadas".
+   - No introducir el estado `retired`.
+7. Verificar con `python3 -m py_compile scripts/sync_catalog.py` que el archivo no contiene errores de sintaxis.
 
 ---
 
-## PASO 2: Actualizar y ampliar pruebas unitarias en tests/test_catalog_sync.py
+## PASO 2: Actualizar y añadir pruebas de regresión focalizadas para marcado de ausencias
 
-**Archivo a modificar:** `tests/test_catalog_sync.py`
+### Archivo a modificar
+- `tests/test_catalog_sync.py`
 
-**Instrucciones:**
-1. Leer `tests/test_catalog_sync.py` para identificar las pruebas existentes de `sync_from_checkpoint` que verifiquen borrados físicos de `Source` o `Media`.
-2. Actualizar las pruebas existentes que esperaban borrado de filas:
-   - Reemplazar aserciones que comprobaban que la fuente o el medio desaparecían (`session.get(...) is None`) por aserciones que demuestren que permanecen en la base de datos, pero la fuente tiene `catalog_presence == "missing"`.
-3. Añadir pruebas de regresión focalizadas (usando la base SQLite temporal / fixtures existentes sin llamadas de red):
-   - **Caso 1 (Marcado de ausencia inicial y preservación de registros):** Un snapshot completo con `stop_reason="natural_end"` omite una fuente existente. Verificar que la fuente NO se borra, su `Media` NO se borra, `source.catalog_presence == "missing"`, `source.missing_since` se establece con la fecha de la ejecución y `source.consecutive_misses == 1`.
-   - **Caso 2 (Ausencias sucesivas preservan timestamp original):** Una segunda sincronización completa que vuelve a omitir la fuente incrementa `source.consecutive_misses` a 2, pero conserva intactos `source.missing_since` original, `source.last_seen_at` y `source.last_seen_run_id`.
-   - **Caso 3 (Ejecución con limit no marca ausencias):** Ejecutar `sync_from_checkpoint` con `limit` (o `delete_enabled=False`). Verificar que una fuente omitida conserva su estado previo (`catalog_presence == "present"` y no pasa a `"missing"`).
-   - **Caso 4 (Dry-run revierte el marcado):** Ejecutar con `dry_run=True`. Verificar que la transacción hace rollback y la fuente no queda persistida como `"missing"`.
-   - **Caso 5 (Checkpoint no apto no altera ausencias):** Con un checkpoint incompleto o con `stop_reason != "natural_end"`, verificar que no se marcan ausencias.
-   - **Caso 6 (Protección de cambio masivo):** Si más del 25% de fuentes resultan ausentes y `allow_large_delete=False`, la función falla/aborta antes de modificar o marcar filas, y ninguna fila es borrada.
-4. Ejecutar la suite de pruebas para confirmar que todo pasa en verde:
-   `. /home/emon/media-integration-gateway/.venv/bin/activate && pytest -q tests/test_catalog_sync.py`
+### Instrucciones
+1. Leer `tests/test_catalog_sync.py` y localizar los tests existentes que verificaban borrado físico de fuentes o medios en la reconciliación de checkpoints.
+2. Actualizar los tests existentes que esperaban que `source` o `media` desaparecieran de la base de datos tras un checkpoint con final natural:
+   - Ahora deben verificar que tanto `Source` como `Media` SIGUEN existiendo en la base de datos.
+   - Deben verificar que `source.catalog_presence == "missing"`.
+3. Añadir o completar casos de prueba con SQLite temporal en memoria / sesión de prueba:
+   - **Caso 1 (Marcado inicial de ausencia y preservación)**: Snapshot completo con `stop_reason="natural_end"` omite una fuente preexistente. Verificar que la fuente no se borra, su `Media` no se borra, `catalog_presence == "missing"`, `missing_since` queda registrado con la marca de tiempo de la ejecución, y `consecutive_misses == 1`.
+   - **Caso 2 (Ausencias consecutivas)**: Ejecutar una segunda reconciliación completa que vuelve a omitir la fuente. Verificar que `consecutive_misses == 2`, pero `missing_since`, `last_seen_at` y `last_seen_run_id` conservan sus valores de la ejecución previa.
+   - **Caso 3 (Preservación con limit)**: Una ejecución con parámetro `--limit` (o `limit` fijado) no debe marcar ausencias ni modificar el estado de fuentes omitidas.
+   - **Caso 4 (Rollback con dry-run)**: Ejecutar con `dry_run=True`. Verificar que la transacción se revierte y la fuente conserva su estado original sin cambios persistidos.
+   - **Caso 5 (Checkpoint no apto)**: Verificar que checkpoints con `stop_reason` distinto de `natural_end` no marcan ausencias ni borran filas.
+   - **Caso 6 (Protección contra cambio masivo >25%)**: Simular omisión masiva superior al 25% del catálogo. Verificar que se dispara el error de seguridad antes de alterar registros y que ninguna fila es borrada ni marcada si no se pasa `allow_large_delete=True`.
+4. Ejecutar la suite de pruebas del archivo:
+   `pytest -q tests/test_catalog_sync.py`
+   y comprobar que pasan al 100%.
 
 ---
 
 ACEPTACION
-. /home/emon/media-integration-gateway/.venv/bin/activate && pytest -q tests/test_catalog_sync.py
-. /home/emon/media-integration-gateway/.venv/bin/activate && pytest -q
 ! grep -q 'await db.delete' scripts/sync_catalog.py
 grep -q 'catalog_presence = "missing"' scripts/sync_catalog.py
-grep -q 'missing_since' scripts/sync_catalog.py
 grep -q 'consecutive_misses' scripts/sync_catalog.py
+grep -q 'missing_since' scripts/sync_catalog.py
 git diff --exit-code c0a9acc -- src/db src/adapters src/api src/services alembic
+pytest -q tests/test_catalog_sync.py
+pytest -q
 
 PREMISES
 

@@ -1123,3 +1123,44 @@ async def test_sync_mass_absence_guard_preserves_rows(tmp_path: Path) -> None:
         assert all(source.consecutive_misses == 0 for source in sources)
     assert await _counts(factory) == (10, 10)
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sync_non_natural_checkpoint_does_not_mark_absence(tmp_path: Path) -> None:
+    """Checkpoints con stop_reason distinto de natural_end no marcan ausencias.
+
+    La validación del checkpoint falla ANTES de tocar la BD, lanzando SystemExit.
+    Debemos verificar que la BD queda intacta.
+    """
+    from scripts.sync_catalog import sync_from_checkpoint
+
+    # Test para cada tipo de stop_reason no natural
+    for stop_reason in ["repeated_page", "max_pages", "interrupted", "pagination_cycle", "no_new_items"]:
+        engine, factory = await _make_db(tmp_path / f"absence-{stop_reason}.db")
+        checkpoint_path = tmp_path / f"absence-{stop_reason}.json"
+        await _seed_catalog_sources(factory, ["included", "omitted"])
+        checkpoint = CatalogCheckpoint(
+            provider="cuevana3",
+            category=None,
+            initial_path="/peliculas/",
+            pages_completed=[1],
+            items=[_movie_item("included", "included", 2026)],
+            status="complete",
+            stop_reason=stop_reason,
+        )
+        save_checkpoint(checkpoint, checkpoint_path)
+
+        with patch("scripts.sync_catalog.AsyncSessionLocal", factory):
+            with pytest.raises(SystemExit):
+                await sync_from_checkpoint(checkpoint_path)
+
+        # Verificar que la BD no fue modificada (validación falla ANTES de abrir BD)
+        async with factory() as db:
+            omitted = (
+                await db.execute(select(Source).where(Source.url == "omitted"))
+            ).scalar_one()
+            assert omitted.catalog_presence == "present", f"Failed for {stop_reason}"
+            assert omitted.missing_since is None, f"Failed for {stop_reason}"
+            assert omitted.consecutive_misses == 0, f"Failed for {stop_reason}"
+        assert await _counts(factory) == (2, 2)
+        await engine.dispose()
