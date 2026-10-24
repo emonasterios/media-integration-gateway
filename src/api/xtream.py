@@ -55,6 +55,76 @@ async def _load_catalog_from_db(
     ]
 
 
+async def _load_single_movie_from_db(
+    media_id: int,
+    db_path: Path | str | None = None,
+) -> MediaItem | None:
+    """Carga UNA película por media_id (PK) desde SQLite. db_path permite tests aislados."""
+    target = Path(db_path) if db_path else DB_PATH
+    if not target.exists():
+        return None
+    async with aiosqlite.connect(str(target)) as db:
+        # Verificar qué columnas existen en la tabla media (compatibilidad con schemas de test)
+        async with db.execute("PRAGMA table_info(media)") as cur:
+            columns = {row[1] for row in await cur.fetchall()}
+        
+        # Construir SELECT dinámico según columnas disponibles
+        base_cols = ["m.id", "m.title", "m.original_title", "m.media_type", "m.year", "m.synopsis", "m.poster_url", "m.genres"]
+        extra_cols = []
+        if "cast" in columns:
+            extra_cols.append("m.cast")
+        else:
+            extra_cols.append("NULL as cast")
+        if "director" in columns:
+            extra_cols.append("m.director")
+        else:
+            extra_cols.append("NULL as director")
+        if "duration" in columns:
+            extra_cols.append("m.duration")
+        else:
+            extra_cols.append("NULL as duration")
+        if "rating" in columns:
+            extra_cols.append("m.rating")
+        else:
+            extra_cols.append("NULL as rating")
+        if "country" in columns:
+            extra_cols.append("m.country")
+        else:
+            extra_cols.append("NULL as country")
+        
+        select_cols = ", ".join(base_cols + extra_cols + ["s.url as source_url"])
+        
+        async with db.execute(
+            f"SELECT {select_cols} "
+            "FROM media m "
+            "LEFT JOIN sources s ON s.media_id = m.id AND s.provider = 'cuevana3' "
+            "WHERE m.media_type = 'movie' AND m.id = ?",
+            (media_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return None
+    # row indices: 0=id, 1=title, 2=original_title, 3=media_type, 4=year, 5=synopsis, 6=poster_url, 7=genres,
+    # 8=cast, 9=director, 10=duration, 11=rating, 12=country, 13=source_url
+    return MediaItem(
+        media_id=str(row[0]),
+        provider="cuevana3",
+        provider_id=row[13] or str(row[0]),
+        title=row[1],
+        original_title=row[2],
+        media_type=MediaType.MOVIE,
+        year=row[4],
+        overview=row[5],
+        poster_url=row[6],
+        genres=json.loads(row[7]) if row[7] else [],
+        cast=json.loads(row[8]) if row[8] else [],
+        director=row[9] or "",
+        duration=row[10] or "",
+        rating=row[11] or 0,
+        country=row[12] or "",
+    )
+
+
 router = APIRouter(tags=["xtream"])
 
 
@@ -287,9 +357,11 @@ async def xtream_player_api(
         except ValueError:
             return {}
 
-        all_movies = await _load_catalog_from_db()
-        all_movies.sort(key=lambda m: (m.media_id or "", m.title))
-        item = find_movie_by_stream_id(all_movies, stream_id)
+        media_id = stream_id - MOVIE_STREAM_ID_BASE
+        if media_id <= 0:
+            return {}
+
+        item = await _load_single_movie_from_db(media_id)
         if item is None:
             return {}
 
@@ -447,8 +519,10 @@ async def stream_movie(
     catalog_service: CatalogService = Depends(_get_catalog_service),
 ):
     """Reproduce una película VOD. Hace proxy del video real con soporte de rangos."""
-    all_movies = await _load_catalog_from_db()
-    media = find_movie_by_stream_id(all_movies, stream_id)
+    media_id = stream_id - MOVIE_STREAM_ID_BASE
+    if media_id <= 0:
+        return {"error": "stream not found", "stream_id": stream_id}
+    media = await _load_single_movie_from_db(media_id)
     if not media:
         return {"error": "stream not found", "stream_id": stream_id}
 
