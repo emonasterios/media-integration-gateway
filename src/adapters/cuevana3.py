@@ -6,10 +6,11 @@ Extrae películas y series del sitio mediante scraping HTTP + BeautifulSoup.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Iterable, Optional
 from urllib.parse import urljoin
 
 import httpx
@@ -24,6 +25,7 @@ from src.models.catalog import (
     Season,
     SearchResult,
 )
+from src.services.catalog import normalize_catalog_url
 from src.services.catalog_checkpoint import (
     CatalogCheckpoint,
     IncompatibleCheckpointError,
@@ -42,6 +44,18 @@ logger = logging.getLogger(__name__)
 
 class CatalogCrawlError(RuntimeError):
     """El catálogo no pudo recorrerse completo y no es un snapshot fiable."""
+
+
+def _compute_page_fingerprint(provider_ids: Iterable[str]) -> str:
+    """Huella estable de una página de catálogo.
+
+    Ordena canónicamente los ``provider_id`` extraídos de los elementos de
+    la página y devuelve el digest SHA-256 hex (64 caracteres) de la
+    secuencia resultante: dos páginas con las mismas identidades producen
+    exactamente la misma huella.
+    """
+    joined = ",".join(sorted(provider_ids))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 class Cuevana3Adapter(MediaProvider):
@@ -153,8 +167,10 @@ class Cuevana3Adapter(MediaProvider):
         seen_provider_ids: set[str] = set()
         visited_pages: set[str] = set()
         page = 1
+        initial_url = path
         page_path = path
 
+        page_path = page_path or initial_url
         while page_path:
             absolute_page = urljoin(f"{self._base}/", page_path)
             if absolute_page in visited_pages:
@@ -266,7 +282,6 @@ class Cuevana3Adapter(MediaProvider):
         on_page: Optional[
             Callable[[list[dict], CatalogCheckpoint], Awaitable[None]]
         ] = None,
-        no_new_pages_threshold: int = 3,
     ) -> CatalogCheckpoint:
         """Descubre el catálogo página a página con checkpoint duradero.
 
@@ -282,15 +297,17 @@ class Cuevana3Adapter(MediaProvider):
         disco el último checkpoint guardado.
 
         Terminación del rastreo: solo el fin natural (la página actual no
-        tiene enlace ``next`` en el DOM) marca ``status="complete"`` con
-        ``stop_reason="natural_end"``. Cualquier otra parada deja
-        ``status="incomplete"`` con un ``stop_reason`` explícito:
-        ``repeated_page`` (la huella de identidades ``(provider,
-        provider_id)`` de la página ya apareció en esta corrida),
-        ``no_new_items`` (``no_new_pages_threshold`` páginas consecutivas
-        sin ningún ``provider_id`` nuevo) o ``max_pages`` (se alcanzó el
-        fusible ``page_limit``). Estas paradas artificiales jamás habilitan
-        la reconciliación de bajas contra la base de datos.
+        tiene enlace ``next`` en el HTML) marca ``status="complete"`` con
+        ``stop_reason="natural_end"``. Cualquier otra terminación deja
+        ``status="incomplete"`` con la causa precisa en ``stop_reason``:
+        ``pagination_cycle`` (la URL siguiente normalizada ya fue visitada
+        en la corrida actual), ``repeated_page`` (la huella de
+        ``provider_id`` ordenados de la página coincide exactamente con la
+        página anterior y no hay avance) o ``max_pages`` (se alcanzó el
+        fusible ``page_limit``). ``no_new_items`` ya no se emite en corridas
+        nuevas; un checkpoint previo que lo traiga se lee sin fallo y la
+        causa se descarta al reanudar. Estas paradas artificiales jamás
+        habilitan la reconciliación de bajas contra la base de datos.
 
         Si se provee ``on_page`` (corutina), se espera su resultado tras
         procesar y validar cada página, con los ítems parseados de la página
@@ -303,6 +320,9 @@ class Cuevana3Adapter(MediaProvider):
 
         checkpoint: CatalogCheckpoint | None = None
         page_path: Optional[str] = None
+        visited_pages: set[str] = set()
+        seen_fingerprints: set[tuple[str, ...]] = set()
+        page = 1
         if ckpt_file.is_file():
             loaded = load_checkpoint(ckpt_file)
             if loaded.provider != self.name or (loaded.category or None) != (
@@ -322,6 +342,8 @@ class Cuevana3Adapter(MediaProvider):
                 return loaded
             # Reanudación: conservar items y páginas ya confirmadas.
             # Deduplicar items existentes por si el checkpoint previo ya tenía duplicados.
+            # Un ``stop_reason`` heredado (p. ej. ``no_new_items``) se lee sin
+            # fallo pero se descarta: nunca se reemite en corridas nuevas.
             checkpoint = CatalogCheckpoint(
                 version=loaded.version,
                 provider=loaded.provider,
@@ -333,6 +355,8 @@ class Cuevana3Adapter(MediaProvider):
                 status=loaded.status,
             )
             page_path = checkpoint.next_page
+            if checkpoint.next_page:
+                initial_url = checkpoint.next_page
             logger.info(
                 "Reanudando descubrimiento en %s desde %r (%d páginas completadas)",
                 ckpt_file,
@@ -352,10 +376,6 @@ class Cuevana3Adapter(MediaProvider):
             page_path = checkpoint.next_page
 
         page = (max(checkpoint.pages_completed) + 1) if checkpoint.pages_completed else 1
-        visited_pages: set[str] = set()
-        # Heurísticas de terminación artificial: viven solo en esta corrida.
-        seen_page_ids: set[frozenset[tuple[str, str]]] = set()
-        pages_without_new = 0
 
         while page_path:
             if page_limit is not None and len(checkpoint.pages_completed) >= page_limit:
@@ -369,12 +389,14 @@ class Cuevana3Adapter(MediaProvider):
                 save_checkpoint(checkpoint, ckpt_file)
                 break
 
-            absolute_page = urljoin(f"{self._base}/", page_path)
-            if absolute_page in visited_pages:
-                raise CatalogCrawlError(
-                    f"Paginación cíclica detectada en página {page}: {absolute_page}"
-                )
-            visited_pages.add(absolute_page)
+            normalized_page = normalize_catalog_url(urljoin(f"{self._base}/", page_path))
+            if normalized_page is not None and normalized_page in visited_pages:
+                checkpoint.status = "incomplete"
+                checkpoint.stop_reason = "pagination_cycle"
+                save_checkpoint(checkpoint, ckpt_file)
+                break
+            if normalized_page is not None:
+                visited_pages.add(normalized_page)
 
             last_error: httpx.HTTPError | None = None
             resp: httpx.Response | None = None
@@ -455,15 +477,9 @@ class Cuevana3Adapter(MediaProvider):
                     }
                 )
 
-            # Huella de identidad de la página: conjunto de (provider, provider_id).
-            # Si una página posterior devuelve exactamente las mismas
-            # identidades, la paginación está en bucle: parada artificial.
-            page_ids = frozenset(
-                (item["provider"], item["provider_id"]) for item in new_items
-            )
-            repeated_page = page_ids in seen_page_ids
-            if not repeated_page:
-                seen_page_ids.add(page_ids)
+            # Huella determinista de la página: provider_id extraídos,
+            # ordenados canónicamente y resumidos en un digest estable.
+            page_fingerprint = tuple(sorted(item["provider_id"] for item in new_items))
 
             total_previo = len(checkpoint.items)
             checkpoint.items = add_items_deduplicated(checkpoint.items, new_items)
@@ -474,26 +490,24 @@ class Cuevana3Adapter(MediaProvider):
             next_href = next_link["href"] if next_link else None
             stop_reason: Optional[str] = None
             if not next_href:
-                # Fin natural: el DOM ya no ofrece enlace siguiente.
                 checkpoint.next_page = None
                 checkpoint.status = "complete"
                 checkpoint.stop_reason = "natural_end"
             else:
                 checkpoint.next_page = next_href
                 checkpoint.status = "incomplete"
-                if repeated_page:
+                normalized_next = normalize_catalog_url(
+                    urljoin(f"{self._base}/", next_href)
+                )
+                if normalized_next is not None and normalized_next in visited_pages:
+                    checkpoint.stop_reason = "pagination_cycle"
+                    stop_reason = "pagination_cycle"
+                elif page_fingerprint in seen_fingerprints and nuevos_en_pagina == 0:
                     checkpoint.stop_reason = "repeated_page"
                     stop_reason = "repeated_page"
-                elif nuevos_en_pagina == 0:
-                    pages_without_new += 1
-                    if pages_without_new >= no_new_pages_threshold:
-                        checkpoint.stop_reason = "no_new_items"
-                        stop_reason = "no_new_items"
-                    else:
-                        checkpoint.stop_reason = None
                 else:
-                    pages_without_new = 0
                     checkpoint.stop_reason = None
+            seen_fingerprints.add(page_fingerprint)
 
             if on_page is not None:
                 await on_page(new_items, checkpoint)
@@ -530,14 +544,6 @@ class Cuevana3Adapter(MediaProvider):
             # Delay entre páginas para no ser baneado
             await asyncio.sleep(1)
 
-        if (
-            checkpoint.status != "complete"
-            and checkpoint.next_page is None
-            and checkpoint.pages_completed
-        ):
-            # Reanudado sin páginas pendientes: consolidar como completo.
-            checkpoint.status = "complete"
-            save_checkpoint(checkpoint, ckpt_file)
 
         if checkpoint.status == "complete":
             logger.info(

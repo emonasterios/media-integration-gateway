@@ -27,6 +27,7 @@ CheckpointStatus = Literal["incomplete", "complete"]
 StopReason = Literal[
     None,
     "natural_end",
+    "pagination_cycle",
     "repeated_page",
     "no_new_items",
     "max_pages",
@@ -62,9 +63,9 @@ class CatalogCheckpoint(BaseModel):
       ``title``, ``url``, ``poster``, ``category``...), deduplicados por
       ``(provider, provider_id)``.
     - ``status``: estrictamente ``"incomplete"`` o ``"complete"``.
-    - ``stop_reason``: razón de parada (``natural_end``, ``repeated_page``,
-      ``no_new_items``, ``max_pages``, ``interrupted``). Solo ``natural_end``
-      habilita la reconciliación de bajas.
+    - ``stop_reason``: razón de parada (``natural_end``, ``pagination_cycle``,
+      ``repeated_page``, ``no_new_items``, ``max_pages``, ``interrupted``).
+      Solo ``natural_end`` habilita la reconciliación de bajas.
     """
 
     version: int = CHECKPOINT_VERSION
@@ -174,8 +175,9 @@ def validate_for_reconciliation(
       :class:`IncompleteSnapshotError` para impedir el borrado masivo basado
       en un snapshot parcial.
     - Exige ``stop_reason == "natural_end"``; cualquier otro valor
-      (``repeated_page``, ``no_new_items``, ``max_pages``, ``interrupted``,
-      ``None``) lanza :class:`IncompleteSnapshotError` para impedir
+      (``pagination_cycle``, ``repeated_page``, ``no_new_items``,
+      ``max_pages``, ``interrupted``, ``None``) lanza
+      :class:`IncompleteSnapshotError` para impedir
       la reconciliación de bajas sobre snapshots truncados artificialmente.
     - Exige que proveedor y categoría coincidan con los esperados; si no,
       lanza :class:`IncompatibleCheckpointError`.

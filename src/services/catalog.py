@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 from src.adapters.base import MediaProvider
 from src.models.catalog import (
@@ -31,6 +33,25 @@ except ImportError:
     select = None  # type: ignore
     selectinload = None  # type: ignore
     _HAS_CACHE = False
+
+
+def normalize_catalog_url(url: str | None) -> str | None:
+    """Normaliza canónicamente una URL de catálogo.
+
+    Devuelve ``None`` para entradas vacías o ``None``; en otro caso,
+    normaliza esquema y netloc a minúsculas, elimina query y fragmento,
+    colapsa barras repetidas consecutivas en la ruta y aplica política
+    uniforme de barra final (se conserva solo si la ruta es ``/``).
+    """
+    if not url:
+        return None
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    netloc = parts.netloc.lower()
+    path = re.sub(r"/{2,}", "/", parts.path)
+    if path != "/":
+        path = path.rstrip("/")
+    return urlunsplit((scheme, netloc, path, "", ""))
 
 
 class CatalogService:

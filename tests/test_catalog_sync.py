@@ -338,25 +338,31 @@ async def test_stop_conditions_repeated_page() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_conditions_no_new_items() -> None:
-    """N páginas sin novedades detienen el crawler con stop_reason='no_new_items'."""
+async def test_pages_without_new_items_continue_to_natural_end() -> None:
+    """Páginas sin novedades no detienen el crawler antes del fin natural."""
     # Página 1 introduce A,B,C. Las páginas 2-4 solo reordenan subconjuntos
     # ya vistos (sin ítems nuevos y sin repetir la huella exacta de una página).
     page1 = [("A", "/pelicula/a/", 2020), ("B", "/pelicula/b/", 2021), ("C", "/pelicula/c/", 2022)]
     page2 = [("A", "/pelicula/a/", 2020), ("B", "/pelicula/b/", 2021)]
     page3 = [("A", "/pelicula/a/", 2020), ("C", "/pelicula/c/", 2022)]
     page4 = [("B", "/pelicula/b/", 2021), ("C", "/pelicula/c/", 2022)]
+    page5 = [("A", "/pelicula/a/", 2020)]
     pages = _build_pages(
-        [page1, page2, page3, page4],
-        ["/peliculas/page/2/", "/peliculas/page/3/", "/peliculas/page/4/", "/peliculas/page/5/"],
+        [page1, page2, page3, page4, page5],
+        [
+            "/peliculas/page/2/",
+            "/peliculas/page/3/",
+            "/peliculas/page/4/",
+            "/peliculas/page/5/",
+            None,
+        ],
     )
 
     checkpoint = await _run_discover(pages)
 
-    assert checkpoint.status == "incomplete"
-    assert checkpoint.stop_reason == "no_new_items"
-    with pytest.raises(IncompleteSnapshotError):
-        validate_for_reconciliation(checkpoint, expected_provider="cuevana3")
+    assert checkpoint.status == "complete"
+    assert checkpoint.stop_reason == "natural_end"
+    validate_for_reconciliation(checkpoint, expected_provider="cuevana3")
 
 
 @pytest.mark.asyncio
