@@ -951,3 +951,175 @@ async def test_sync_from_checkpoint_records_and_restores_positive_presence(
             assert source.missing_since is None
             assert source.consecutive_misses == 0
     await engine.dispose()
+
+
+async def _seed_catalog_sources(factory, provider_ids: list[str]) -> None:
+    """Crea películas con una fuente presente y una última observación conocida."""
+    last_seen_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    async with factory() as db:
+        for provider_id in provider_ids:
+            media = Media(
+                title=provider_id,
+                original_title=provider_id,
+                media_type="movie",
+                year=2026,
+            )
+            media.sources.append(
+                Source(
+                    provider="cuevana3",
+                    url=provider_id,
+                    quality="auto",
+                    language="es",
+                    catalog_presence="present",
+                    last_seen_at=last_seen_at,
+                    last_seen_run_id="last-positive-run",
+                    consecutive_misses=0,
+                )
+            )
+            db.add(media)
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_sync_marks_absence_without_deleting_and_preserves_history(
+    tmp_path: Path,
+) -> None:
+    from scripts.sync_catalog import sync_from_checkpoint
+
+    engine, factory = await _make_db(tmp_path / "absence-history.db")
+    checkpoint_path = tmp_path / "absence-history.json"
+    await _seed_catalog_sources(factory, ["still-present", "now-missing"])
+    checkpoint = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        pages_completed=[1],
+        items=[_movie_item("still-present", "still-present", 2026)],
+        status="complete",
+        stop_reason="natural_end",
+    )
+    save_checkpoint(checkpoint, checkpoint_path)
+
+    with patch("scripts.sync_catalog.AsyncSessionLocal", factory):
+        await sync_from_checkpoint(checkpoint_path, run_id="absence-run-1")
+
+    async with factory() as db:
+        source = (
+            await db.execute(select(Source).where(Source.url == "now-missing"))
+        ).scalar_one()
+        first_missing_since = source.missing_since
+        last_seen_at = source.last_seen_at
+        assert source.catalog_presence == "missing"
+        assert first_missing_since is not None
+        assert source.consecutive_misses == 1
+        assert source.last_seen_run_id == "last-positive-run"
+    assert await _counts(factory) == (2, 2)
+
+    with patch("scripts.sync_catalog.AsyncSessionLocal", factory):
+        await sync_from_checkpoint(checkpoint_path, run_id="absence-run-2")
+
+    async with factory() as db:
+        source = (
+            await db.execute(select(Source).where(Source.url == "now-missing"))
+        ).scalar_one()
+        assert source.catalog_presence == "missing"
+        assert source.missing_since == first_missing_since
+        assert source.consecutive_misses == 2
+        assert source.last_seen_at == last_seen_at
+        assert source.last_seen_run_id == "last-positive-run"
+    assert await _counts(factory) == (2, 2)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sync_limit_does_not_mark_absence(tmp_path: Path) -> None:
+    from scripts.sync_catalog import sync_from_checkpoint
+
+    engine, factory = await _make_db(tmp_path / "absence-limit.db")
+    checkpoint_path = tmp_path / "absence-limit.json"
+    await _seed_catalog_sources(factory, ["included", "omitted"])
+    checkpoint = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        pages_completed=[1],
+        items=[_movie_item("included", "included", 2026)],
+        status="complete",
+        stop_reason="natural_end",
+    )
+    save_checkpoint(checkpoint, checkpoint_path)
+
+    with patch("scripts.sync_catalog.AsyncSessionLocal", factory):
+        await sync_from_checkpoint(checkpoint_path, limit=1)
+
+    async with factory() as db:
+        omitted = (
+            await db.execute(select(Source).where(Source.url == "omitted"))
+        ).scalar_one()
+        assert omitted.catalog_presence == "present"
+        assert omitted.missing_since is None
+        assert omitted.consecutive_misses == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sync_dry_run_rolls_back_absence(tmp_path: Path) -> None:
+    from scripts.sync_catalog import sync_from_checkpoint
+
+    engine, factory = await _make_db(tmp_path / "absence-dry-run.db")
+    checkpoint_path = tmp_path / "absence-dry-run.json"
+    await _seed_catalog_sources(factory, ["included", "omitted"])
+    checkpoint = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        pages_completed=[1],
+        items=[_movie_item("included", "included", 2026)],
+        status="complete",
+        stop_reason="natural_end",
+    )
+    save_checkpoint(checkpoint, checkpoint_path)
+
+    with patch("scripts.sync_catalog.AsyncSessionLocal", factory):
+        await sync_from_checkpoint(checkpoint_path, dry_run=True)
+
+    async with factory() as db:
+        omitted = (
+            await db.execute(select(Source).where(Source.url == "omitted"))
+        ).scalar_one()
+        assert omitted.catalog_presence == "present"
+        assert omitted.missing_since is None
+        assert omitted.consecutive_misses == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sync_mass_absence_guard_preserves_rows(tmp_path: Path) -> None:
+    from scripts.sync_catalog import sync_from_checkpoint
+
+    engine, factory = await _make_db(tmp_path / "absence-guard.db")
+    checkpoint_path = tmp_path / "absence-guard.json"
+    provider_ids = [f"movie-{index}" for index in range(10)]
+    await _seed_catalog_sources(factory, provider_ids)
+    checkpoint = CatalogCheckpoint(
+        provider="cuevana3",
+        category=None,
+        initial_path="/peliculas/",
+        pages_completed=[1],
+        items=[_movie_item(provider_id, provider_id, 2026) for provider_id in provider_ids[:7]],
+        status="complete",
+        stop_reason="natural_end",
+    )
+    save_checkpoint(checkpoint, checkpoint_path)
+
+    with patch("scripts.sync_catalog.AsyncSessionLocal", factory):
+        with pytest.raises(RuntimeError, match="se marcaría ausente 3/10"):
+            await sync_from_checkpoint(checkpoint_path)
+
+    async with factory() as db:
+        sources = (await db.execute(select(Source))).scalars().all()
+        assert all(source.catalog_presence == "present" for source in sources)
+        assert all(source.missing_since is None for source in sources)
+        assert all(source.consecutive_misses == 0 for source in sources)
+    assert await _counts(factory) == (10, 10)
+    await engine.dispose()
