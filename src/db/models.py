@@ -42,6 +42,15 @@ class Source(Base):
     quality = Column(String, nullable=True)
     language = Column(String, nullable=True)
 
+    # Persistencia de presencia de catálogo.
+    catalog_presence = Column(String(16), nullable=False, default="present")
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    # SIN ForeignKey: es String(36) plano para no invalidar el historial
+    # al purgar corridas antiguas de catalog_sync_runs.
+    last_seen_run_id = Column(String(36), nullable=True)
+    missing_since = Column(DateTime(timezone=True), nullable=True)
+    consecutive_misses = Column(Integer, nullable=False, default=0)
+
     media = relationship("Media", back_populates="sources")
 
 

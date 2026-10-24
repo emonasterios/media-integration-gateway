@@ -178,3 +178,131 @@ def test_downgrade_d6e1f2a3b4c5_drops_page_url_column(tmp_path: Path) -> None:
         page_url_columns = [column for column in columns if column[1] == "page_url"]
         assert len(page_url_columns) == 1
         assert page_url_columns[0][3] == 0
+
+
+def test_catalog_presence_full_cycle_preserves_rows(tmp_path: Path) -> None:
+    """El ciclo f8a3b2c1d4e5 -> head -> f8a3b2c1d4e5 -> head preserva los datos."""
+    database_path = tmp_path / "catalog-presence-cycle.db"
+
+    # 1) Base temporal en f8a3b2c1d4e5 con registros previos en media y sources.
+    _alembic_upgrade(database_path, "f8a3b2c1d4e5")
+
+    with sqlite3.connect(database_path) as connection:
+        connection.executemany(
+            "INSERT INTO media (id, title, media_type) VALUES (?, ?, ?)",
+            [(1, "Cycle Movie", "movie"), (2, "Cycle Series", "series")],
+        )
+        connection.executemany(
+            """
+            INSERT INTO sources (id, media_id, provider, url, quality, language)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (10, 1, "provider", "cycle-url-1", "1080p", "es"),
+                (11, 2, "provider", "cycle-url-2", "720p", "en"),
+            ],
+        )
+
+    # 2) Upgrade a head: filas previas intactas y defaults de presencia aplicados.
+    _alembic_upgrade(database_path, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT id, title, media_type FROM media ORDER BY id"
+        ).fetchall() == [(1, "Cycle Movie", "movie"), (2, "Cycle Series", "series")]
+        assert connection.execute(
+            """
+            SELECT id, media_id, provider, url, quality, language, page_url
+            FROM sources ORDER BY id
+            """
+        ).fetchall() == [
+            (10, 1, "provider", "cycle-url-1", "1080p", "es", None),
+            (11, 2, "provider", "cycle-url-2", "720p", "en", None),
+        ]
+        assert connection.execute(
+            """
+            SELECT catalog_presence, consecutive_misses, last_seen_at,
+                   last_seen_run_id, missing_since
+            FROM sources ORDER BY id
+            """
+        ).fetchall() == [
+            ("present", 0, None, None, None),
+            ("present", 0, None, None, None),
+        ]
+
+    # 3) Nueva fuente en head con valores explícitos de presencia.
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO sources (
+                media_id, provider, url, catalog_presence, consecutive_misses,
+                last_seen_at, last_seen_run_id, missing_since
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                2,
+                "provider",
+                "cycle-url-3",
+                "missing",
+                1,
+                "2026-10-23 20:00:00",
+                "run-test-id",
+                "2026-10-23 21:00:00",
+            ),
+        )
+        assert connection.execute(
+            """
+            SELECT media_id, provider, url, catalog_presence, consecutive_misses,
+                   last_seen_at, last_seen_run_id, missing_since
+            FROM sources WHERE url = 'cycle-url-3'
+            """
+        ).fetchall() == [
+            (
+                2,
+                "provider",
+                "cycle-url-3",
+                "missing",
+                1,
+                "2026-10-23 20:00:00",
+                "run-test-id",
+                "2026-10-23 21:00:00",
+            ),
+        ]
+
+    # 4) Downgrade: las cinco columnas nuevas desaparecen y los datos persisten.
+    _alembic_downgrade(database_path, "f8a3b2c1d4e5")
+
+    with sqlite3.connect(database_path) as connection:
+        column_names = [
+            column[1]
+            for column in connection.execute("PRAGMA table_info(sources)").fetchall()
+        ]
+        assert "catalog_presence" not in column_names
+        assert "last_seen_at" not in column_names
+        assert "last_seen_run_id" not in column_names
+        assert "missing_since" not in column_names
+        assert "consecutive_misses" not in column_names
+        assert connection.execute("SELECT id FROM media ORDER BY id").fetchall() == [(1,), (2,)]
+        assert connection.execute(
+            "SELECT id, media_id, provider, url FROM sources ORDER BY id"
+        ).fetchall() == [
+            (10, 1, "provider", "cycle-url-1"),
+            (11, 2, "provider", "cycle-url-2"),
+            (12, 2, "provider", "cycle-url-3"),
+        ]
+
+    # 5) Re-upgrade a head: completa exitosamente restableciendo defaults compatibles.
+    _alembic_upgrade(database_path, "head")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            """
+            SELECT catalog_presence, consecutive_misses, last_seen_at,
+                   last_seen_run_id, missing_since
+            FROM sources ORDER BY id
+            """
+        ).fetchall() == [
+            ("present", 0, None, None, None),
+            ("present", 0, None, None, None),
+            ("present", 0, None, None, None),
+        ]
