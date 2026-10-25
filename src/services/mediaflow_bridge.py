@@ -82,8 +82,9 @@ async def resolve_with_mediaflow(embed_url: str, domain: str) -> Optional[Playba
     req_headers = result.get("request_headers", {})
     endpoint = result.get("mediaflow_endpoint", "")
 
-    # Doodstream devuelve mp4 directo; Voe devuelve HLS
-    protocol = "hls" if "hls" in endpoint.lower() else "mp4"
+    # Doodstream devuelve mp4 directo; Voe y los resolvers propios (vimeos…) devuelven HLS
+    is_hls = "hls" in endpoint.lower() or ".m3u8" in dest_url.lower()
+    protocol = "hls" if is_hls else "mp4"
 
     return PlaybackDescriptor(
         protocol=protocol,

@@ -14,7 +14,7 @@ _MEDIA_RE = re.compile(r"https?://[^\s'\"]+\.(?:m3u8|mp4)(?:\?[^\s'\"]*)?", re.I
 
 
 class WaawResolver:
-    def __init__(self, url: str = ""):
+    def __init__(self, url: str = "", request_headers: dict | None = None):
         self.url = url
 
     async def extract(self, url: str | None = None) -> dict:

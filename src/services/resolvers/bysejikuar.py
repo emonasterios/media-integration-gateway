@@ -19,7 +19,7 @@ _PACKED_RE = re.compile(r"eval\(function\(p,a,c,k,e,d\)", re.IGNORECASE | re.DOT
 
 
 class BysejikuarResolver:
-    def __init__(self, url: str = ""):
+    def __init__(self, url: str = "", request_headers: dict | None = None):
         self.url = url
 
     async def extract(self, url: str | None = None) -> dict:
