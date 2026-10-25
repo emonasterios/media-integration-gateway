@@ -487,6 +487,45 @@ class TestCatalogCacheDirect:
         not_found = await cache.get_by_source("cuevana3", "otra")
         assert not_found is None
 
+    @pytest.mark.asyncio
+    async def test_get_by_source_excludes_missing_catalog_presence(self, db_session):
+        """get_by_source retorna None para fuentes con catalog_presence='missing'
+        y recupera el medio cuando la fuente está 'present'."""
+        cache = CatalogCache(db_session, ttl_seconds=3600)
+        now = datetime.utcnow()
+
+        media_missing = Media(title="Pelicula ausente", media_type="movie", updated_at=now)
+        db_session.add(media_missing)
+        await db_session.flush()
+        source_missing = Source(
+            media_id=media_missing.id,
+            provider="test_provider",
+            url="pelicula-ausente",
+            catalog_presence="missing",
+        )
+        db_session.add(source_missing)
+
+        media_present = Media(title="Pelicula presente", media_type="movie", updated_at=now)
+        db_session.add(media_present)
+        await db_session.flush()
+        source_present = Source(
+            media_id=media_present.id,
+            provider="test_provider",
+            url="pelicula-presente",
+            catalog_presence="present",
+        )
+        db_session.add(source_present)
+        await db_session.commit()
+
+        # La fuente ausente no debe exponerse como disponible.
+        missing = await cache.get_by_source("test_provider", "pelicula-ausente")
+        assert missing is None
+
+        # La fuente presente sí se recupera normalmente.
+        found = await cache.get_by_source("test_provider", "pelicula-presente")
+        assert found is not None
+        assert found.title == "Pelicula presente"
+
 
 class TestCacheWithTTLZero:
     """Tests con TTL = 0 (caché siempre expirada)."""

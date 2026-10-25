@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.database import get_db
@@ -15,7 +16,7 @@ from src.models.catalog import MediaItem, MediaType
 router = APIRouter(tags=["m3u"])
 
 
-def _convert_db_media_to_item(db_media: Media) -> MediaItem:
+def _convert_db_media_to_item(db_media: Media) -> MediaItem | None:
     """Convierte un objeto Media de la BD a MediaItem del catálogo."""
     media_type_str = db_media.media_type
     if media_type_str == "movie":
@@ -27,22 +28,23 @@ def _convert_db_media_to_item(db_media: Media) -> MediaItem:
     else:
         media_type = MediaType.MOVIE
 
-    # Extraer provider y provider_id desde sources
-    provider = ""
-    provider_id = ""
-    if db_media.sources:
-        provider = db_media.sources[0].provider
-        provider_id = db_media.sources[0].url
+    # Extraer provider y provider_id desde una source presente
+    source = next((s for s in db_media.sources if s.catalog_presence == "present"), None)
+    if source is None:
+        return None
+
+    provider = source.provider
+    provider_id = source.url
 
     return MediaItem(
-        media_id=f"{provider}:{provider_id}" if provider_id else f"{provider}:{db_media.id}",
+        media_id=f"{provider}:{provider_id}",
         title=db_media.title,
         media_type=media_type,
         year=db_media.year,
         poster_url=db_media.poster_url,
         overview=db_media.synopsis,
         provider=provider,
-        provider_id=provider_id or str(db_media.id),
+        provider_id=provider_id,
     )
 
 
@@ -62,7 +64,7 @@ async def get_m3u_playlist(
 ):
     """Genera playlist M3U a partir de los elementos cacheados en la base de datos."""
     # Obtener todos los elementos de media cacheados (con sources cargados)
-    stmt = select(Media)
+    stmt = select(Media).options(selectinload(Media.sources))
     result = await db.execute(stmt)
     db_media_list = result.scalars().all()
 
@@ -73,13 +75,9 @@ async def get_m3u_playlist(
     lines = ["#EXTM3U"]
 
     for db_media in db_media_list:
-        # Cargar sources si no están cargados
-        await db.refresh(db_media, ["sources"])
-        
-        if not db_media.sources:
-            continue
-
         item = _convert_db_media_to_item(db_media)
+        if item is None:
+            continue
 
         # Determinar grupo
         group = _get_group_title(item.media_type)

@@ -32,8 +32,9 @@ async def _load_catalog_from_db(
             "SELECT m.id, m.title, m.original_title, m.media_type, m.year, m.synopsis, m.poster_url, m.genres, "
             "s.url as source_url "
             "FROM media m "
-            "LEFT JOIN sources s ON s.media_id = m.id AND s.provider = 'cuevana3' "
+            "JOIN sources s ON s.media_id = m.id AND s.provider = 'cuevana3' AND COALESCE(s.catalog_presence, 'present') = 'present' "
             "WHERE m.media_type = ? "
+            "GROUP BY m.id, m.title, m.original_title, m.media_type, m.year, m.synopsis, m.poster_url, m.genres, s.url "
             "ORDER BY m.id",
             (media_type.value,),
         ) as cur:
@@ -42,7 +43,7 @@ async def _load_catalog_from_db(
         MediaItem(
             media_id=str(row[0]),
             provider="cuevana3",
-            provider_id=row[8] or str(row[0]),  # url de sources, fallback a id
+            provider_id=row[8] or str(row[0]),
             title=row[1],
             original_title=row[2],
             media_type=media_type,
@@ -97,8 +98,9 @@ async def _load_single_movie_from_db(
         async with db.execute(
             f"SELECT {select_cols} "
             "FROM media m "
-            "LEFT JOIN sources s ON s.media_id = m.id AND s.provider = 'cuevana3' "
-            "WHERE m.media_type = 'movie' AND m.id = ?",
+            "JOIN sources s ON s.media_id = m.id AND s.provider = 'cuevana3' AND COALESCE(s.catalog_presence, 'present') = 'present' "
+            "WHERE m.media_type = 'movie' AND m.id = ? "
+            "GROUP BY m.id",
             (media_id,),
         ) as cur:
             row = await cur.fetchone()
@@ -293,21 +295,11 @@ async def xtream_player_api(
 
     if action == "get_vod_categories":
         genres: set[str] = set()
-        try:
-            async with aiosqlite.connect(str(DB_PATH)) as db:
-                async with db.execute(
-                    "SELECT genres FROM media WHERE media_type='movie' AND genres IS NOT NULL AND genres != '[]'"
-                ) as cursor:
-                    async for row in cursor:
-                        try:
-                            for genre in json.loads(row[0]):
-                                genres.add(genre)
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            continue
-        except Exception:
-            pass
+        movies = await _load_catalog_from_db(media_type=MediaType.MOVIE)
+        for movie in movies:
+            genres.update(movie.genres or [])
         if genres:
-            return _build_genre_categories(genres)
+            return _build_genre_categories(movies)
         # Fallback: leer del caché en memoria de catalog_service
         movies: list[MediaItem] = []
         cache = getattr(catalog_service, "_catalog_cache", {})

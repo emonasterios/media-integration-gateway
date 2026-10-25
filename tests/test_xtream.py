@@ -217,16 +217,19 @@ def temp_db_path(tmp_path):
         provider TEXT,
         url TEXT,
         quality TEXT,
-        language TEXT
+        language TEXT,
+        catalog_presence TEXT DEFAULT 'present'
     )""")
     conn.execute("INSERT INTO media VALUES (1, 'Test Movie', 'Test Movie', 'movie', 2024, 'Overview', 'http://poster.jpg', '[\"Acción\", \"Drama\"]')")
     conn.execute("INSERT INTO media VALUES (2, 'Another Movie', 'Another Movie', 'movie', 2023, 'Overview 2', 'http://poster2.jpg', '[\"Comedia\"]')")
     conn.execute("INSERT INTO media VALUES (3, 'Third Movie', 'Third Movie', 'movie', 2022, 'Overview 3', 'http://poster3.jpg', '[\"Terror\", \"Suspense\"]')")
     conn.execute("INSERT INTO media VALUES (4, 'Database Series', 'Database Series', 'series', 2021, 'Stored overview', 'http://series-poster.jpg', '[\"Drama\"]')")
-    conn.execute("INSERT INTO sources VALUES (1, 1, 'cuevana3', 'test-movie', 'auto', 'es')")
-    conn.execute("INSERT INTO sources VALUES (2, 2, 'cuevana3', 'another-movie', 'auto', 'es')")
-    conn.execute("INSERT INTO sources VALUES (3, 3, 'cuevana3', 'third-movie', 'auto', 'es')")
-    conn.execute("INSERT INTO sources VALUES (4, 4, 'cuevana3', 'database-series', 'auto', 'es')")
+    conn.execute("INSERT INTO sources VALUES (1, 1, 'cuevana3', 'test-movie', 'auto', 'es', 'present')")
+    conn.execute("INSERT INTO sources VALUES (2, 2, 'cuevana3', 'another-movie', 'auto', 'es', 'present')")
+    conn.execute("INSERT INTO sources VALUES (3, 3, 'cuevana3', 'third-movie', 'auto', 'es', 'present')")
+    conn.execute("INSERT INTO sources VALUES (4, 4, 'cuevana3', 'database-series', 'auto', 'es', 'present')")
+    conn.execute("INSERT INTO media VALUES (5, 'Missing Movie', 'Missing Movie', 'movie', 2020, 'Missing overview', 'http://missing.jpg', '[\"Suspense\"]')")
+    conn.execute("INSERT INTO sources VALUES (5, 5, 'cuevana3', 'missing-movie', 'auto', 'es', 'missing')")
     conn.commit()
     conn.close()
     return db_path
@@ -470,7 +473,8 @@ def test_player_api_get_vod_streams(client, temp_db_path):
         assert r.status_code == 200
         data = r.json()
         assert isinstance(data, list)
-        assert len(data) > 0
+        assert len(data) == 3
+        assert all(item["name"] != "Missing Movie" for item in data)
     finally:
         xtream_module.DB_PATH = original_db_path
 
@@ -483,13 +487,19 @@ def test_player_api_get_vod_streams_filtered_by_category(client, temp_db_path):
         r = client.get("/player_api.php?username=test&password=***&action=get_vod_streams&category_id=1")
         assert r.status_code == 200
         data = r.json()
-        assert len(data) > 0
+        # category_id=1 es Acción: solo Test Movie; Missing Movie (ausente) no se publica.
+        assert len(data) == 1
+        assert data[0]["name"] == "Test Movie"
+        assert all(item["name"] != "Missing Movie" for item in data)
         assert all(item["category_id"] == "1" for item in data)
 
         r = client.get("/player_api.php?username=test&password=***&action=get_vod_streams&category_id=2")
         assert r.status_code == 200
         data = r.json()
-        assert len(data) > 0
+        # category_id=2 es Comedia: solo Another Movie.
+        assert len(data) == 1
+        assert data[0]["name"] == "Another Movie"
+        assert all(item["name"] != "Missing Movie" for item in data)
         assert all(item["category_id"] == "2" for item in data)
     finally:
         xtream_module.DB_PATH = original_db_path
@@ -524,7 +534,7 @@ def test_player_api_get_vod_info(client, temp_db_path):
         assert r.status_code == 200
         data = r.json()
         assert data["info"]["name"] == "Test Movie"
-        assert data["movie_data"]["stream_id"] == 100000 + 1
+        assert data["movie_data"]["stream_id"] == 100001
         assert data["movie_data"]["container_extension"] == "mp4"
     finally:
         xtream_module.DB_PATH = original_db_path
@@ -867,14 +877,15 @@ def custom_temp_db_path(tmp_path):
         provider TEXT,
         url TEXT,
         quality TEXT,
-        language TEXT
+        language TEXT,
+        catalog_presence TEXT DEFAULT 'present'
     )""")
     conn.execute("INSERT INTO media VALUES (1, 'Matrix', 'The Matrix', 'movie', 1999, 'Sci-fi classic', 'http://poster.jpg', '[\"Acción\", \"Ciencia Ficción\"]')")
     conn.execute("INSERT INTO media VALUES (2, 'Inception', 'Inception', 'movie', 2010, 'Dream heist', 'http://poster2.jpg', '[\"Ciencia Ficción\", \"Thriller\"]')")
     conn.execute("INSERT INTO media VALUES (3, 'Breaking Bad', 'Breaking Bad', 'series', 2008, 'Chemistry teacher', 'http://series.jpg', '[\"Drama\", \"Crimen\"]')")
-    conn.execute("INSERT INTO sources VALUES (1, 1, 'cuevana3', 'matrix', 'auto', 'es')")
-    conn.execute("INSERT INTO sources VALUES (2, 2, 'cuevana3', 'inception', 'auto', 'es')")
-    conn.execute("INSERT INTO sources VALUES (3, 3, 'cuevana3', 'breaking-bad', 'auto', 'es')")
+    conn.execute("INSERT INTO sources VALUES (1, 1, 'cuevana3', 'matrix', 'auto', 'es', 'present')")
+    conn.execute("INSERT INTO sources VALUES (2, 2, 'cuevana3', 'inception', 'auto', 'es', 'present')")
+    conn.execute("INSERT INTO sources VALUES (3, 3, 'cuevana3', 'breaking-bad', 'auto', 'es', 'present')")
     conn.commit()
     conn.close()
     return db_path
@@ -997,6 +1008,151 @@ class TestNoNetworkRegression:
         assert r.status_code == 200
         data = r.json()
         assert data["info"]["name"] == "Matrix"
+
+
+# ============================================================
+# PASO 5: Pruebas de regresión - exclusión de fuentes ausentes
+# (catalog_presence='missing') en las lecturas públicas Xtream
+# ============================================================
+
+
+@pytest.fixture()
+def presence_db_path(tmp_path):
+    """BD SQLite temporal con dos películas de cuevana3 sembradas a la vez:
+    Película A con catalog_presence='present' y Película B con 'missing'."""
+    import sqlite3
+    db_path = tmp_path / "presence_gateway.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""CREATE TABLE media (
+        id INTEGER PRIMARY KEY,
+        title TEXT,
+        original_title TEXT,
+        media_type TEXT,
+        year INTEGER,
+        synopsis TEXT,
+        poster_url TEXT,
+        genres TEXT
+    )""")
+    conn.execute("""CREATE TABLE sources (
+        id INTEGER PRIMARY KEY,
+        media_id INTEGER,
+        provider TEXT,
+        url TEXT,
+        quality TEXT,
+        language TEXT,
+        catalog_presence TEXT DEFAULT 'present'
+    )""")
+    # Película A: fuente cuevana3 presente (stream_id estable 100001).
+    conn.execute("INSERT INTO media VALUES (1, 'Pelicula Presente', 'Pelicula Presente', 'movie', 2023, 'Sinopsis A', 'http://presente.jpg', '[\"Acción\", \"Drama\"]')")
+    # Película B: fuente cuevana3 ausente (stream_id 100002), con género exclusivo.
+    conn.execute("INSERT INTO media VALUES (2, 'Pelicula Ausente', 'Pelicula Ausente', 'movie', 2024, 'Sinopsis B', 'http://ausente.jpg', '[\"Suspenso Exclusivo\"]')")
+    conn.execute("INSERT INTO sources VALUES (1, 1, 'cuevana3', 'pelicula-presente', 'auto', 'es', 'present')")
+    conn.execute("INSERT INTO sources VALUES (2, 2, 'cuevana3', 'pelicula-ausente', 'auto', 'es', 'missing')")
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+class TestMissingPresenceRegression:
+    """Siembra simultánea de película A (present) y película B (missing).
+
+    Las lecturas públicas de Xtream solo deben publicar la película cuya
+    fuente tiene catalog_presence='present'.
+    """
+
+    def test_get_vod_streams_only_lists_present_movie(self, client, presence_db_path):
+        """get_vod_streams: solo la película A; la B (ausente) queda excluida."""
+        original_db_path = xtream_module.DB_PATH
+        xtream_module.DB_PATH = presence_db_path
+        try:
+            r = client.get(
+                "/player_api.php",
+                params={"username": "test", "password": "test", "action": "get_vod_streams"},
+            )
+            assert r.status_code == 200
+            data = r.json()
+            names = [item["name"] for item in data]
+            stream_ids = {item["stream_id"] for item in data}
+            # Solo la película A (id BD 1 -> stream_id 100001).
+            assert names == ["Pelicula Presente"]
+            assert 100001 in stream_ids
+            # La película B (id BD 2 -> stream_id 100002) no se publica.
+            assert "Pelicula Ausente" not in names
+            assert 100002 not in stream_ids
+        finally:
+            xtream_module.DB_PATH = original_db_path
+
+    def test_get_vod_info_missing_movie_empty_and_present_movie_detailed(self, client, presence_db_path):
+        """get_vod_info: la película B responde vacío o error/404 y la A su detalle."""
+        original_db_path = xtream_module.DB_PATH
+        xtream_module.DB_PATH = presence_db_path
+        try:
+            r_a = client.get(
+                "/player_api.php",
+                params={
+                    "username": "test", "password": "test",
+                    "action": "get_vod_info", "vod_id": "100001",
+                },
+            )
+            assert r_a.status_code == 200
+            data_a = r_a.json()
+            assert data_a["info"]["name"] == "Pelicula Presente"
+            assert data_a["movie_data"]["stream_id"] == 100001
+
+            r_b = client.get(
+                "/player_api.php",
+                params={
+                    "username": "test", "password": "test",
+                    "action": "get_vod_info", "vod_id": "100002",
+                },
+            )
+            # Respuesta vacía o error/404; nunca el detalle de la película B.
+            assert r_b.status_code in (200, 404)
+            if r_b.status_code == 200:
+                assert r_b.json() == {}
+        finally:
+            xtream_module.DB_PATH = original_db_path
+
+    def test_movie_route_missing_movie_never_streamed(self, client, presence_db_path):
+        """Endpoint /movie/...mp4 con la película B: no debe servirse el video."""
+        original_db_path = xtream_module.DB_PATH
+        xtream_module.DB_PATH = presence_db_path
+        try:
+            r_b = client.get("/movie/test/test/100002.mp4", follow_redirects=False)
+            # La fuente ausente no debe publicarse como stream: rechazo 404
+            # directo, o la respuesta controlada de error (JSON, no video) que
+            # ya fija test_vod_stream_id_inexistente_is_controlled para esta ruta.
+            assert r_b.status_code in (200, 404)
+            if r_b.status_code == 200:
+                assert "error" in r_b.json()
+                assert "video" not in r_b.headers.get("content-type", "")
+
+            # La película A (presente) sí se sirve correctamente.
+            r_a = client.get("/movie/test/test/100001.mp4", follow_redirects=False)
+            assert r_a.status_code == 200
+            assert "video/mp4" in r_a.headers["content-type"]
+        finally:
+            xtream_module.DB_PATH = original_db_path
+
+    def test_get_vod_categories_excludes_missing_movie_genre(self, client, presence_db_path):
+        """get_vod_categories: el género exclusivo de la película B no se lista."""
+        original_db_path = xtream_module.DB_PATH
+        xtream_module.DB_PATH = presence_db_path
+        try:
+            r = client.get(
+                "/player_api.php",
+                params={"username": "test", "password": "test", "action": "get_vod_categories"},
+            )
+            assert r.status_code == 200
+            data = r.json()
+            category_names = [c["category_name"] for c in data]
+            # Género exclusivo de la película B ausente: no debe listarse.
+            assert "Suspenso Exclusivo" not in category_names
+            # Los géneros de la película A presente sí aparecen.
+            assert "Acción" in category_names
+            assert "Drama" in category_names
+        finally:
+            xtream_module.DB_PATH = original_db_path
 
 
 if __name__ == "__main__":

@@ -107,10 +107,11 @@ async def test_get_playlist_empty_cache(app_with_db):
 
 
 @pytest.mark.asyncio
-async def test_get_playlist_with_cached_items(app_with_db, db_session):
-    """GET /playlist.m3u con items en caché genera playlist M3U válida."""
+async def test_get_playlist_filters_missing_sources(app_with_db, db_session):
+    """GET /playlist.m3u incluye solo medios con source presente."""
     now = datetime.utcnow()
-    media = Media(
+
+    present_media = Media(
         title="Signal One",
         original_title="signal-one",
         media_type="movie",
@@ -120,18 +121,39 @@ async def test_get_playlist_with_cached_items(app_with_db, db_session):
         created_at=now,
         updated_at=now,
     )
-    db_session.add(media)
-    await db_session.commit()
-    await db_session.refresh(media)
-
-    source = Source(
-        media_id=media.id,
-        provider="cuevana3",
-        url="signal-one",
-        quality="1080p",
-        language="es",
+    missing_media = Media(
+        title="Ghost Signal",
+        original_title="ghost-signal",
+        media_type="movie",
+        year=2026,
+        synopsis="Una película ausente",
+        poster_url="https://example.com/ghost-signal.jpg",
+        created_at=now,
+        updated_at=now,
     )
-    db_session.add(source)
+    db_session.add_all([present_media, missing_media])
+    await db_session.commit()
+    await db_session.refresh(present_media)
+    await db_session.refresh(missing_media)
+
+    db_session.add_all([
+        Source(
+            media_id=present_media.id,
+            provider="cuevana3",
+            url="signal-one",
+            quality="1080p",
+            language="es",
+            catalog_presence="present",
+        ),
+        Source(
+            media_id=missing_media.id,
+            provider="cuevana3",
+            url="ghost-signal",
+            quality="1080p",
+            language="es",
+            catalog_presence="missing",
+        ),
+    ])
     await db_session.commit()
 
     transport = ASGITransport(app=app_with_db)
@@ -141,9 +163,10 @@ async def test_get_playlist_with_cached_items(app_with_db, db_session):
     assert "application/x-mpegurl" in r.headers["content-type"]
 
     content = r.text
-    assert "#EXTM3U" in content
     assert '#EXTINF:-1 group-title="Peliculas",Signal One (2026)' in content
     assert "/api/v1/resolve/cuevana3/signal-one" in content
+    assert "Ghost Signal" not in content
+    assert "/api/v1/resolve/cuevana3/ghost-signal" not in content
 
 
 @pytest.mark.asyncio
