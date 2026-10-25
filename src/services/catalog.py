@@ -92,7 +92,7 @@ class CatalogService:
         """Convierte un objeto Media de la BD a MediaItem del catálogo."""
         if db_media is None:
             return None
-        
+
         media_type_str = db_media.media_type
         if media_type_str == "movie":
             media_type = MediaType.MOVIE
@@ -102,27 +102,27 @@ class CatalogService:
             media_type = MediaType.EPISODE
         else:
             media_type = MediaType.MOVIE
-        
-        # Extraer provider_id desde sources
-        provider_id = ""
-        if db_media.sources:
-            # Buscar source que coincida con el provider solicitado
-            for src in db_media.sources:
-                if src.provider == provider:
-                    provider_id = src.url  # usamos URL como provider_id en la BD
-                    break
-            if not provider_id:
-                provider_id = db_media.sources[0].url
-        
+
+        provider_source = None
+        for src in db_media.sources or []:
+            if src.provider == provider and getattr(src, "catalog_presence", "present") == "present":
+                provider_source = src
+                break
+
+        if provider_source is None:
+            return None
+
+        provider_id = provider_source.url
+
         return MediaItem(
-            media_id=f"{provider}:{provider_id}" if provider_id else f"{provider}:{db_media.id}",
+            media_id=f"{provider}:{provider_id}",
             title=db_media.title,
             media_type=media_type,
             year=db_media.year,
             poster_url=db_media.poster_url,
             overview=db_media.synopsis,
             provider=provider,
-            provider_id=provider_id or str(db_media.id),
+            provider_id=provider_id,
         )
 
     async def _get_from_cache(self, provider: str, media_id: str) -> MediaItem | None:
@@ -166,6 +166,7 @@ class CatalogService:
             .options(selectinload(Media.sources))
             .join(Source, Source.media_id == Media.id)
             .where(Source.provider == provider)
+            .where(Source.catalog_presence == "present")
             .order_by(Media.id)
         )
         async with self._db_read_lock:

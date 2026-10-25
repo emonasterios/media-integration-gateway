@@ -44,7 +44,7 @@ class CatalogCache:
         return media
 
     async def get_by_source(self, provider: str, provider_id: str) -> Optional[Media]:
-        """Busca por la fuente (proveedor + id del proveedor)."""
+        """Busca por la fuente (proveedor + id del proveedor), solo fuentes presentes en catálogo."""
         provider_name = provider.name if hasattr(provider, "name") else str(provider)
         if ":" in provider_id:
             provider_id = provider_id.split(":", 1)[1]
@@ -52,7 +52,11 @@ class CatalogCache:
             select(Media)
             .options(selectinload(Media.sources))
             .join(Source, Source.media_id == Media.id)
-            .filter(Source.provider == provider_name, Source.url == provider_id)
+            .filter(
+                Source.provider == provider_name,
+                Source.url == provider_id,
+                Source.catalog_presence == "present",
+            )
         )
         result = await self.db.execute(stmt)
         media = result.scalar_one_or_none()
