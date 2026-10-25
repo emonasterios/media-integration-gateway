@@ -15,16 +15,61 @@ from src.models.catalog import MediaItem, MediaType, SearchResult, PlaybackDescr
 from src.api.xtream import _get_catalog_service, _build_genre_categories, _genre_to_id
 import src.api.xtream as xtream_module
 
+_ORIGINAL_VERIFY_PLAYBACK_URL = xtream_module._verify_playback_url
+
 
 @pytest.fixture(autouse=True)
-def isolate_xtream_default_db(tmp_path):
-    """Impide que cualquier endpoint Xtream cree `data/gateway.db` en tests."""
+def isolate_xtream_default_db(tmp_path, monkeypatch):
+    """Impide que cualquier endpoint Xtream cree `data/gateway.db` en tests y simula CDN vivo."""
+    async def _mock_verify_playback_url(url: str, protocol: str) -> bool:
+        return True
+
+    monkeypatch.setattr(xtream_module, "_verify_playback_url", _mock_verify_playback_url)
     original_db_path = xtream_module.DB_PATH
     xtream_module.DB_PATH = tmp_path / "default_gateway.db"
     try:
         yield
     finally:
         xtream_module.DB_PATH = original_db_path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "protocol,status,content_type,expected",
+    [
+        ("hls", 200, "application/vnd.apple.mpegurl", True),
+        ("hls", 206, "application/octet-stream", True),
+        ("mp4", 200, "video/mp4", True),
+        ("mp4", 200, "text/html", False),
+        ("mp4", 404, "video/mp4", False),
+        ("embed", 200, "text/html", False),
+    ],
+)
+async def test_verify_playback_url(monkeypatch, protocol, status, content_type, expected):
+    class FakeResponse:
+        status_code = status
+        headers = {"content-type": content_type}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs["follow_redirects"] is True
+            assert kwargs["max_redirects"] == 3
+            assert kwargs["timeout"] == 8.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def head(self, url):
+            assert url == "https://cdn.example/video"
+            return FakeResponse()
+
+    monkeypatch.setattr(xtream_module.httpx, "AsyncClient", FakeClient)
+    assert await _ORIGINAL_VERIFY_PLAYBACK_URL(
+        "https://cdn.example/video", protocol
+    ) is expected
 
 
 

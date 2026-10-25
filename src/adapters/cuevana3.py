@@ -11,10 +11,11 @@ import logging
 import re
 from pathlib import Path
 from typing import Awaitable, Callable, Iterable, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+from src.services.resolvers.unpacker import unpack_js as unpack
 
 from src.adapters.base import MediaProvider
 from src.models.catalog import (
@@ -38,6 +39,15 @@ from src.services.video_resolver import VideoResolver
 from src.services.mediaflow_bridge import resolve_with_mediaflow
 
 BASE_URL = "https://cuevana3i.cc"
+
+_FLARE_UNPACK_DOMAINS = {
+    "streamwish.to", "streamwish.com", "ajmidyad.sbs",
+    "vimeos.net",
+    "bysejikuar.com",
+    "vidhide.com", "vidhidepro.com",
+    "filelions.to", "filelions.com",
+    "voe.sx", "voe-unblock.com", "voeunblock.com", "voeunbl0ck.com", "voeunblocker.com",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -717,6 +727,22 @@ class Cuevana3Adapter(MediaProvider):
             except Exception as e:
                 logger.debug("mediaflow_bridge falló para %s: %s", candidate, e)
 
+        if domain in _FLARE_UNPACK_DOMAINS or base_domain in _FLARE_UNPACK_DOMAINS:
+            try:
+                flaresolverr = FlareSolverrClient()
+                solution = await asyncio.to_thread(
+                    flaresolverr.get_solution,
+                    server_url,
+                    max_timeout=60000,
+                )
+                if solution and solution.get("response"):
+                    html = solution["response"]
+                    m3u8_url = self._unpack_eval_and_extract_m3u8(html)
+                    if m3u8_url and await self._check_cdn_alive(m3u8_url):
+                        return PlaybackDescriptor(protocol="hls", url=m3u8_url, headers={})
+            except Exception as e:
+                logger.debug("FlareSolverr+unpack falló para %s: %s", server_url, e)
+
         # Fallback a resolvers custom
         if VideoResolver.is_doodstream(server_url):
             try:
@@ -749,6 +775,51 @@ class Cuevana3Adapter(MediaProvider):
         # No devolver embed — si ningún resolver funciona, retornar None
         logger.warning("Ningún resolver pudo obtener video directo de %s", server_url[:80])
         return None
+
+    @staticmethod
+    def _unpack_eval_and_extract_m3u8(html: str) -> Optional[str]:
+        import re
+        from src.services.resolvers.unpacker import unpack_js
+
+        # Find all script tags that might contain packed JS
+        script_pattern = re.compile(r'<script[^>]*>(.*?)</script>', re.DOTALL)
+        scripts = script_pattern.findall(html)
+
+        # Also check the full HTML for packed JS
+        sources = [html] + scripts
+
+        for source in sources:
+            # Try the new unpack_js which handles the actual Dean Edwards format
+            try:
+                unpacked = unpack_js(source)
+                if unpacked and unpacked != source:
+                    # Look for m3u8 URLs in unpacked result
+                    matches = re.findall(r"https?://[^\s\"'<>]+\.m3u8[^\s\"'<>]*", unpacked)
+                    for url in matches:
+                        if "master" in url or "playlist" in url or url.endswith(".m3u8"):
+                            return url
+                    if matches:
+                        return matches[0]
+            except Exception:
+                continue
+
+        return None
+
+    @staticmethod
+    async def _check_cdn_alive(m3u8_url: str) -> bool:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True, headers=headers) as client:
+                resp = await client.head(m3u8_url)
+                return resp.status_code in (200, 206)
+        except Exception:
+            return False
 
     @staticmethod
     def _is_cloudflare_challenge(resp: httpx.Response | None, html: str | None) -> bool:
@@ -784,12 +855,13 @@ class Cuevana3Adapter(MediaProvider):
             logger.info("Cloudflare challenge detectado en %s, intentando FlareSolverr", url)
         except (httpx.TimeoutException, httpx.HTTPError) as e:
             logger.warning("Error HTTP/Timeout en %s: %s", url, e)
-            html = None
-            resp = None
+            # Un error de transporte no demuestra un challenge de Cloudflare.
+            # El llamador debe poder probar la siguiente ruta o reportar timeout.
+            return None, None
         
         # Fallback a FlareSolverr
         try:
-            solution = self._flaresolverr.get_solution(url)
+            solution = await asyncio.to_thread(self._flaresolverr.get_solution, url)
             if solution and solution.get("response"):
                 logger.info("FlareSolverr resolvió challenge para %s", url)
                 return solution["response"], None

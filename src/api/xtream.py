@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Request, HTTPException
+import httpx
 
 from src.models.catalog import MediaItem, MediaType
 from src.services.catalog import CatalogService
@@ -463,7 +464,6 @@ async def xtream_panel_api(
 # ── Streaming endpoints (lo que la TV pide al reproducir) ──────────
 
 from fastapi.responses import RedirectResponse, StreamingResponse
-import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -529,22 +529,24 @@ async def stream_movie(
                 direct = await resolver.resolve_voe(result.url)
                 if direct and direct.protocol in ("hls", "mp4"):
                     result = direct
-                    logger.info("Redirecting to direct %s URL: %s", result.protocol, result.url[:80])
-                    return RedirectResponse(url=result.url, status_code=302)
             elif VideoResolver.is_doodstream(result.url):
                 direct = await resolver.resolve_doodstream(result.url)
                 if direct and direct.protocol in ("hls", "mp4"):
                     result = direct
-                    logger.info("Redirecting to direct %s URL: %s", result.protocol, result.url[:80])
-                    return RedirectResponse(url=result.url, status_code=302)
         except Exception as e:
             logger.warning("Fallo resolviendo embed %s: %s", result.url, e)
         finally:
             await resolver.close()
 
-        # Si llegamos aquí, el resolver falló - NO hacer fallback al embed
-        logger.error("No se pudo resolver video real para embed: %s", result.url)
-        raise HTTPException(status_code=500, detail="No se pudo resolver fuente de video")
+        if result.protocol == "embed":
+            # El resolver falló: no hacer fallback al HTML embed.
+            logger.error("No se pudo resolver video real para embed: %s", result.url)
+            raise HTTPException(status_code=500, detail="No se pudo resolver fuente de video")
+
+    # Validar la URL final, después de convertir cualquier embed a HLS/MP4.
+    if not await _verify_playback_url(result.url, result.protocol):
+        logger.warning("Playback URL no responde (CDN muerto): %s", result.url[:80])
+        raise HTTPException(status_code=502, detail="Fuente de video no disponible (CDN caído)")
 
     if result.protocol == "mp4":
         proxy_headers = {
@@ -577,6 +579,31 @@ async def _proxy_stream(url: str, headers: dict):
         async with client.stream("GET", url, headers=headers) as response:
             async for chunk in response.aiter_bytes(chunk_size=65536):
                 yield chunk
+
+
+async def _verify_playback_url(url: str, protocol: str) -> bool:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        async with httpx.AsyncClient(
+            timeout=8.0,
+            follow_redirects=True,
+            max_redirects=3,
+            headers=headers,
+        ) as client:
+            response = await client.head(url)
+            if response.status_code == 405:
+                response = await client.get(url, headers={"Range": "bytes=0-1024"})
+            if response.status_code in (200, 206):
+                if protocol == "mp4":
+                    content_type = response.headers.get("content-type", "").lower()
+                    return "video" in content_type or "octet-stream" in content_type or not content_type
+                return protocol == "hls"
+            return False
+    except Exception as e:
+        logger.warning("Error validando URL de reproducción %s: %s", url, e)
+        return False
 
 
 @router.get("/series/{username}/{password}/{stream_id}/{episode}.{ext}")
