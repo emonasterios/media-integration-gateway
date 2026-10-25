@@ -17,9 +17,11 @@ Reglas de seguridad del rastreo (ver plan del inventario):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -672,3 +674,200 @@ def get_inventory_status(db_path: str) -> dict:
         dict con el estado (ver CatalogInventoryDB.get_status).
     """
     return CatalogInventoryDB(db_path).get_status()
+
+
+def import_inventory_to_catalog(
+    inventory_db_path: str, catalog_db_path: str, dry_run: bool = False
+) -> dict:
+    """Importa el inventario de películas al catálogo operativo de forma transaccional e idempotente.
+
+    Args:
+        inventory_db_path: Ruta al SQLite del inventario (p.ej. data/cuevana3_inventory.sqlite).
+        catalog_db_path: Ruta al SQLite del catálogo operativo (p.ej. data/media_gateway.db).
+        dry_run: Si True, ejecuta toda la lógica pero hace ROLLBACK al final.
+
+    Returns:
+        dict con resumen: inventory_read, category_relations_read, inserted,
+        updated, unchanged, status.
+
+    Raises:
+        ValueError: si el inventario no tiene corrida completada o hay categorías incompletas.
+    """
+    # 1. Validaciones previas del inventario (solo lectura)
+    inv_conn = sqlite3.connect(f"file:{inventory_db_path}?mode=ro", uri=True)
+    try:
+        # Verificar última corrida
+        run_row = inv_conn.execute(
+            "SELECT status FROM runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not run_row or run_row[0] != "complete":
+            raise ValueError("El inventario no tiene una corrida completada")
+
+        # Verificar categorías: todas deben ser complete y confirmed_page == last_page
+        cat_rows = inv_conn.execute(
+            "SELECT slug, status, confirmed_page, last_page FROM categories"
+        ).fetchall()
+        for slug, status, confirmed_page, last_page in cat_rows:
+            if status != "complete" or confirmed_page != last_page:
+                raise ValueError("Hay categorías incompletas o con discrepancia de páginas")
+
+        # Cargar películas
+        movie_rows = inv_conn.execute(
+            "SELECT provider, provider_id, title, year, poster, url FROM movies"
+        ).fetchall()
+        if not movie_rows:
+            return {
+                "inventory_read": 0,
+                "category_relations_read": 0,
+                "inserted": 0,
+                "updated": 0,
+                "unchanged": 0,
+                "status": "dry-run/rolled-back" if dry_run else "committed",
+            }
+
+        # 2. Carga y mapeo en memoria: join movies + movie_categories + categories
+        # para obtener nombres visibles de categorías (categories.name)
+        rel_rows = inv_conn.execute(
+            """
+            SELECT mc.provider, mc.provider_id, c.name
+            FROM movie_categories mc
+            JOIN categories c ON mc.category_slug = c.slug
+            """
+        ).fetchall()
+
+        # Agrupar nombres de categorías por (provider, provider_id)
+        cat_map: dict[tuple[str, str], list[str]] = {}
+        for provider, provider_id, cat_name in rel_rows:
+            key = (provider, provider_id)
+            cat_map.setdefault(key, []).append(cat_name)
+
+        read_category_relations = len(rel_rows)
+
+        # Construir lista de películas con géneros JSON determinista
+        movies: list[dict] = []
+        for provider, provider_id, title, year, poster, url in movie_rows:
+            key = (provider, provider_id)
+            cat_names = cat_map.get(key, [])
+            genres_json = json.dumps(
+                sorted(list(set(cat_names))), ensure_ascii=False
+            )
+            movies.append({
+                "provider": provider,
+                "provider_id": provider_id,
+                "title": title,
+                "year": year,
+                "poster_url": poster,
+                "page_url": url,
+                "genres": genres_json,
+            })
+    finally:
+        inv_conn.close()
+
+    read_inventory = len(movies)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # 3. Transacción atómica en el catálogo destino
+    cat_conn = sqlite3.connect(catalog_db_path, isolation_level=None)
+    inserted = 0
+    updated = 0
+    unchanged = 0
+    status = "dry-run/rolled-back" if dry_run else "committed"
+    try:
+        cat_conn.execute("PRAGMA foreign_keys = ON;")
+        cat_conn.execute("BEGIN IMMEDIATE")
+
+        for movie in movies:
+            provider = movie["provider"]
+            provider_id = movie["provider_id"]
+            title = movie["title"]
+            year = movie["year"]
+            poster_url = movie["poster_url"]
+            page_url = movie["page_url"]
+            genres = movie["genres"]
+
+            # Buscar en sources por (provider, url) donde url = provider_id
+            src_row = cat_conn.execute(
+                "SELECT id, media_id FROM sources WHERE provider = ? AND url = ?",
+                (provider, provider_id),
+            ).fetchone()
+
+            if src_row:
+                # Fuente ya existe
+                source_id, media_id = src_row
+
+                # Comprobar si media o sources han cambiado
+                media_row = cat_conn.execute(
+                    "SELECT title, year, poster_url, genres FROM media WHERE id = ?",
+                    (media_id,),
+                ).fetchone()
+                src_page_url_row = cat_conn.execute(
+                    "SELECT page_url FROM sources WHERE id = ?",
+                    (source_id,),
+                ).fetchone()
+
+                media_changed = False
+                if media_row:
+                    db_title, db_year, db_poster, db_genres = media_row
+                    if (
+                        db_title != title
+                        or db_year != year
+                        or db_poster != poster_url
+                        or db_genres != genres
+                    ):
+                        media_changed = True
+
+                src_page_url = src_page_url_row[0] if src_page_url_row else None
+                src_changed = src_page_url != page_url
+
+                if media_changed or src_changed:
+                    # Actualizar media
+                    cat_conn.execute(
+                        "UPDATE media SET title = ?, year = ?, poster_url = ?, genres = ?, updated_at = ? WHERE id = ?",
+                        (title, year, poster_url, genres, now_iso, media_id),
+                    )
+                    # Actualizar sources
+                    cat_conn.execute(
+                        "UPDATE sources SET page_url = ?, catalog_presence = 'present', last_seen_at = ?, missing_since = NULL, consecutive_misses = 0 WHERE id = ?",
+                        (page_url, now_iso, source_id),
+                    )
+                    updated += 1
+                else:
+                    # Solo actualizar campos de presencia en sources
+                    cat_conn.execute(
+                        "UPDATE sources SET catalog_presence = 'present', last_seen_at = ?, missing_since = NULL, consecutive_misses = 0 WHERE id = ?",
+                        (now_iso, source_id),
+                    )
+                    unchanged += 1
+            else:
+                # Fuente NO existe: insertar en media y sources
+                cat_conn.execute(
+                    "INSERT INTO media (title, year, media_type, poster_url, genres, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (title, year, "movie", poster_url, genres, now_iso, now_iso),
+                )
+                new_media_id = cat_conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+                cat_conn.execute(
+                    "INSERT INTO sources (media_id, provider, url, page_url, catalog_presence, last_seen_at, missing_since, consecutive_misses) VALUES (?, ?, ?, ?, 'present', ?, NULL, 0)",
+                    (new_media_id, provider, provider_id, page_url, now_iso),
+                )
+                inserted += 1
+
+        if dry_run:
+            cat_conn.execute("ROLLBACK")
+        else:
+            cat_conn.execute("COMMIT")
+    except BaseException:
+        with suppress(sqlite3.Error):
+            cat_conn.execute("ROLLBACK")
+        raise
+    finally:
+        cat_conn.close()
+
+    return {
+        "inventory_read": read_inventory,
+        "category_relations_read": read_category_relations,
+        "inserted": inserted,
+        "updated": updated,
+        "unchanged": unchanged,
+        "status": status,
+    }

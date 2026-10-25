@@ -36,6 +36,7 @@ from src.services.catalog_checkpoint import (
 from src.services.catalog_inventory import (
     CatalogInventoryService,
     get_inventory_status,
+    import_inventory_to_catalog,
 )
 
 PROVIDER = "cuevana3"
@@ -529,6 +530,17 @@ if __name__ == "__main__":
         default="data/cuevana3_inventory.sqlite",
         help="Ruta del archivo SQLite del inventario",
     )
+    parser.add_argument(
+        "--inventory-import",
+        action="store_true",
+        help="Importar inventario validado del recorrido 1 al catálogo operativo",
+    )
+    parser.add_argument(
+        "--catalog-db",
+        type=str,
+        default=None,
+        help="Ruta del SQLite destino del catálogo operativo",
+    )
     args = parser.parse_args()
 
     if args.status:
@@ -543,6 +555,26 @@ if __name__ == "__main__":
     if args.inventory_status:
         status = get_inventory_status(args.inventory_db)
         print_inventory_status(status)
+        sys.exit(0)
+
+    if args.inventory_import:
+        if not args.inventory_db or not args.catalog_db:
+            print(
+                "ERROR: --inventory-import requiere --inventory-db y --catalog-db",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        summary = import_inventory_to_catalog(
+            inventory_db_path=args.inventory_db,
+            catalog_db_path=args.catalog_db,
+            dry_run=args.dry_run,
+        )
+        print(f"Inventario leído: {summary['inventory_read']}")
+        print(f"Relaciones de categorías: {summary['category_relations_read']}")
+        print(f"Insertados: {summary['inserted']}")
+        print(f"Actualizados: {summary['updated']}")
+        print(f"Sin cambios: {summary['unchanged']}")
+        print(f"Estado: {summary['status']}")
         sys.exit(0)
 
     if args.inventory_discover:
