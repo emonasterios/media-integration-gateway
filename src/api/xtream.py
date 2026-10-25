@@ -30,11 +30,11 @@ async def _load_catalog_from_db(
     async with aiosqlite.connect(str(target)) as db:
         async with db.execute(
             "SELECT m.id, m.title, m.original_title, m.media_type, m.year, m.synopsis, m.poster_url, m.genres, "
-            "s.url as source_url "
+            "MIN(s.url) as source_url "
             "FROM media m "
-            "JOIN sources s ON s.media_id = m.id AND s.provider = 'cuevana3' AND COALESCE(s.catalog_presence, 'present') = 'present' "
+            "JOIN sources s ON s.media_id = m.id AND s.provider = 'cuevana3' AND s.catalog_presence = 'present' "
             "WHERE m.media_type = ? "
-            "GROUP BY m.id, m.title, m.original_title, m.media_type, m.year, m.synopsis, m.poster_url, m.genres, s.url "
+            "GROUP BY m.id, m.title, m.original_title, m.media_type, m.year, m.synopsis, m.poster_url, m.genres "
             "ORDER BY m.id",
             (media_type.value,),
         ) as cur:
@@ -98,7 +98,7 @@ async def _load_single_movie_from_db(
         async with db.execute(
             f"SELECT {select_cols} "
             "FROM media m "
-            "JOIN sources s ON s.media_id = m.id AND s.provider = 'cuevana3' AND COALESCE(s.catalog_presence, 'present') = 'present' "
+            "JOIN sources s ON s.media_id = m.id AND s.provider = 'cuevana3' AND s.catalog_presence = 'present' "
             "WHERE m.media_type = 'movie' AND m.id = ? "
             "GROUP BY m.id",
             (media_id,),

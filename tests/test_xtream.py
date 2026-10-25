@@ -1082,6 +1082,29 @@ class TestMissingPresenceRegression:
         finally:
             xtream_module.DB_PATH = original_db_path
 
+    def test_get_vod_streams_deduplicates_multiple_present_sources(self, client, presence_db_path):
+        """Un medio con varias fuentes presentes del proveedor se publica una sola vez."""
+        import sqlite3
+
+        conn = sqlite3.connect(str(presence_db_path))
+        conn.execute(
+            "INSERT INTO sources VALUES (3, 1, 'cuevana3', 'pelicula-presente-alternativa', 'auto', 'es', 'present')"
+        )
+        conn.commit()
+        conn.close()
+
+        original_db_path = xtream_module.DB_PATH
+        xtream_module.DB_PATH = presence_db_path
+        try:
+            response = client.get(
+                "/player_api.php",
+                params={"username": "test", "password": "test", "action": "get_vod_streams"},
+            )
+            assert response.status_code == 200
+            assert [item["name"] for item in response.json()] == ["Pelicula Presente"]
+        finally:
+            xtream_module.DB_PATH = original_db_path
+
     def test_get_vod_info_missing_movie_empty_and_present_movie_detailed(self, client, presence_db_path):
         """get_vod_info: la película B responde vacío o error/404 y la A su detalle."""
         original_db_path = xtream_module.DB_PATH
