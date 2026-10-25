@@ -33,6 +33,10 @@ from src.services.catalog_checkpoint import (
     validate_for_reconciliation,
     save_checkpoint,
 )
+from src.services.catalog_inventory import (
+    CatalogInventoryService,
+    get_inventory_status,
+)
 
 PROVIDER = "cuevana3"
 DEFAULT_CHECKPOINT_PATH = "data/cuevana3_checkpoint.json"
@@ -90,6 +94,22 @@ def print_checkpoint_status(checkpoint: CatalogCheckpoint) -> None:
     print(f"Estado: {checkpoint.status}")
     print(f"Razón de parada: {checkpoint.stop_reason or 'ninguna'}")
     print(f"Próxima página: {checkpoint.next_page or 'ninguna (final)'}")
+
+
+def print_inventory_status(status: dict) -> None:
+    """Imprime el resumen del estado del inventario SQLite (sin red)."""
+    print(f"Estado de la corrida: {status.get('run_status')}")
+    print(f"Categoría actual: {status.get('current_category') or 'ninguna'}")
+    print(
+        f"Página confirmada/última: {status.get('confirmed_page', 0)}"
+        f"/{status.get('last_page', 0)}"
+    )
+    print(
+        f"Categorías completas/total: {status.get('categories_completed', 0)}"
+        f"/{status.get('categories_total', 0)}"
+    )
+    print(f"Películas únicas: {status.get('unique_movies_count', 0)}")
+    print(f"Último error: {status.get('last_error') or 'ninguno'}")
 
 
 async def persist_page_batch(
@@ -493,6 +513,22 @@ if __name__ == "__main__":
         action="store_true",
         help="Reconciliar catálogo desde checkpoint en disco (sin rastreo en vivo)",
     )
+    parser.add_argument(
+        "--inventory-discover",
+        action="store_true",
+        help="Iniciar o reanudar inventario de películas por categorías",
+    )
+    parser.add_argument(
+        "--inventory-status",
+        action="store_true",
+        help="Consultar estado del inventario SQLite sin acceder a la red",
+    )
+    parser.add_argument(
+        "--inventory-db",
+        type=str,
+        default="data/cuevana3_inventory.sqlite",
+        help="Ruta del archivo SQLite del inventario",
+    )
     args = parser.parse_args()
 
     if args.status:
@@ -503,6 +539,23 @@ if __name__ == "__main__":
         except CheckpointCorruptedError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             sys.exit(1)
+
+    if args.inventory_status:
+        status = get_inventory_status(args.inventory_db)
+        print_inventory_status(status)
+        sys.exit(0)
+
+    if args.inventory_discover:
+        adapter = Cuevana3Adapter()
+        try:
+            service = CatalogInventoryService()
+            inventory_status = asyncio.run(
+                service.run_inventory(args.inventory_db, adapter)
+            )
+        finally:
+            asyncio.run(adapter.close())
+        print_inventory_status(inventory_status)
+        sys.exit(0)
 
     if args.from_checkpoint:
         asyncio.run(

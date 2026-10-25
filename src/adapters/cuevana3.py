@@ -68,6 +68,123 @@ def _compute_page_fingerprint(provider_ids: Iterable[str]) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
+def _extract_genre_slug(href: str) -> Optional[str]:
+    """Extrae el slug del patrón ``/genero/<slug>/`` de un ``href``.
+
+    Normaliza el slug (minúsculas, sin barra al inicio ni al final).
+    Devuelve ``None`` si el ``href`` no corresponde al patrón esperado.
+    """
+    if not href:
+        return None
+    m = re.search(r"/genero/([^/]+)/?", href)
+    if not m:
+        return None
+    return m.group(1).strip("/").lower()
+
+
+def extract_menu_categories(
+    html: str, base_url: str = BASE_URL
+) -> list[dict]:
+    """Extrae categorías del menú a partir de enlaces ``/genero/<slug>/``.
+
+    Parsea el HTML localizando enlaces cuyo ``href`` contiene el patrón
+    ``/genero/<slug>/``. Normaliza el slug (minúsculas, sin barra al inicio
+    ni al final), deduplica por slug conservando el primer nombre visible
+    limpio encontrado, y devuelve una lista de diccionarios con las claves
+    ``slug``, ``name`` y ``url`` (URL canónica absoluta). Si ``html`` está
+    vacío o no contiene enlaces del patrón, devuelve una lista vacía.
+    """
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "lxml")
+    seen: set[str] = set()
+    categories: list[dict] = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        slug = _extract_genre_slug(href)
+        if slug is None:
+            continue
+        if slug in seen:
+            continue
+        seen.add(slug)
+        name = a.get_text(" ", strip=True)
+        # Colapsar espacios en el nombre visible
+        name = " ".join(name.split())
+        canonical_url = urljoin(base_url.rstrip("/") + "/", href)
+        categories.append({"slug": slug, "name": name, "url": canonical_url})
+    return categories
+
+
+def extract_last_page(html: str) -> int:
+    """Determina el límite de paginación numérica a partir del HTML de una página.
+
+    Busca enlaces/anclas de paginación (``a.page-link``, ``.page-numbers``,
+    ``a[href*='page/']`` y similares) y extrae todos los números enteros
+    anunciados como páginas. Devuelve el valor entero máximo encontrado.
+
+    El límite se fija **exclusivamente** a partir de la paginación numérica
+    leída en la primera página: el rastreo debe recorrer estrictamente
+    ``1..last_page`` sin solicitar jamás ``last_page + 1``. No se utiliza
+    ``a.next`` para determinar el límite, ya que puede conducir a solicitar
+    páginas inexistentes (``last_page + 1``) entrando en bucles o fallando
+    silenciosamente.
+
+    Si no hay paginación numérica en el HTML, devuelve ``1``.
+    """
+    if not html:
+        return 1
+    soup = BeautifulSoup(html, "lxml")
+
+    page_numbers: set[int] = set()
+
+    def _is_next_link(el) -> bool:
+        classes = el.get("class", []) or []
+        cls_str = " ".join(classes).lower()
+        # Etiquetas genéricas de "siguiente"/"next" que NO anuncian un número
+        # de página real y deben excluirse del cálculo del límite.
+        for token in cls_str.split():
+            if token in ("next", "prev", "previous", "first", "last", "nav-next", "nav-prev"):
+                return True
+        text = el.get_text(" ", strip=True).lower()
+        if re.fullmatch(r"\s*(siguiente|next|>\u00bb|»)\s*", text):
+            return True
+        return False
+
+    # Anclas de paginación numérica: a.page-link, .page-numbers, etc.
+    # Se excluyen explícitamente los enlaces "next" (a.next) para que el
+    # límite dependa únicamente de la paginación numérica anunciada.
+    for selector in (
+        "a.page-link",
+        ".page-numbers",
+        "a[href*='page/']",
+        "a[href*='/page/']",
+        ".pagination a",
+    ):
+        for el in soup.select(selector):
+            if _is_next_link(el):
+                continue
+            for token in re.findall(r"\d+", el.get_text(strip=True)):
+                page_numbers.add(int(token))
+
+    # 2) href: extrae el segmento numérico de /page/N/ o ?paged=N / ?page=N
+    #    ignorando los enlaces de "next" cuyo href lleva a last_page+1.
+    for el in soup.find_all("a", href=True):
+        if _is_next_link(el):
+            continue
+        href = el["href"]
+        m = re.search(r"[?&](?:paged|page|pg|p)=(\d+)", href)
+        if m:
+            page_numbers.add(int(m.group(1)))
+            continue
+        m = re.search(r"/page/(\d+)", href)
+        if m:
+            page_numbers.add(int(m.group(1)))
+
+    if not page_numbers:
+        return 1
+    return max(page_numbers)
+
+
 class Cuevana3Adapter(MediaProvider):
     """Adapter de lectura para cuevana3i.cc."""
 
