@@ -13,7 +13,6 @@ _SOURCES_RE = re.compile(
     r"sources\s*:\s*\[\s*\{\s*file\s*:\s*['\"]([^'\"]+)['\"]",
     re.IGNORECASE | re.DOTALL,
 )
-_PACKED_RE = re.compile(r"eval\(function\(p,a,c,k,e,", re.IGNORECASE | re.DOTALL)
 
 
 class VimeosResolver:
@@ -32,9 +31,7 @@ class VimeosResolver:
         )
         html = response.text
 
-        packed_match = _PACKED_RE.search(html)
-        packed_script = packed_match.group(0) if packed_match else html
-        unpacked = unpack_js(packed_script)
+        unpacked = unpack_js(html)
 
         source_match = _SOURCES_RE.search(unpacked)
         if source_match:
