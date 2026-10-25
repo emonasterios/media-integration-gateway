@@ -529,22 +529,24 @@ async def stream_movie(
                 direct = await resolver.resolve_voe(result.url)
                 if direct and direct.protocol in ("hls", "mp4"):
                     result = direct
-                    logger.info("Redirecting to direct %s URL: %s", result.protocol, result.url[:80])
-                    return RedirectResponse(url=result.url, status_code=302)
             elif VideoResolver.is_doodstream(result.url):
                 direct = await resolver.resolve_doodstream(result.url)
                 if direct and direct.protocol in ("hls", "mp4"):
                     result = direct
-                    logger.info("Redirecting to direct %s URL: %s", result.protocol, result.url[:80])
-                    return RedirectResponse(url=result.url, status_code=302)
         except Exception as e:
             logger.warning("Fallo resolviendo embed %s: %s", result.url, e)
         finally:
             await resolver.close()
 
-        # Si llegamos aquí, el resolver falló - NO hacer fallback al embed
-        logger.error("No se pudo resolver video real para embed: %s", result.url)
-        raise HTTPException(status_code=500, detail="No se pudo resolver fuente de video")
+        if result.protocol == "embed":
+            # El resolver falló: no hacer fallback al HTML embed.
+            logger.error("No se pudo resolver video real para embed: %s", result.url)
+            raise HTTPException(status_code=500, detail="No se pudo resolver fuente de video")
+
+    # Validar la URL final, después de convertir cualquier embed a HLS/MP4.
+    if not await _verify_playback_url(result.url, result.protocol):
+        logger.warning("Playback URL no responde (CDN muerto): %s", result.url[:80])
+        raise HTTPException(status_code=502, detail="Fuente de video no disponible (CDN caído)")
 
     if result.protocol == "mp4":
         proxy_headers = {
@@ -569,6 +571,27 @@ async def stream_movie(
 
     # Si no es directo ni se pudo resolver
     raise HTTPException(status_code=500, detail="Fuente de video no disponible")
+
+
+async def _verify_playback_url(url: str, protocol: str) -> bool:
+    """Verifica que la URL de playback responde. Útil para detectar CDN caídos."""
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            max_redirects=3,
+            timeout=8.0,
+        ) as client:
+            response = await client.head(url)
+        if response.status_code not in (200, 206):
+            return False
+        if protocol == "hls":
+            return True
+        if protocol == "mp4":
+            content_type = response.headers.get("content-type", "")
+            return "video/" in content_type
+        return False
+    except Exception:
+        return False
 
 
 async def _proxy_stream(url: str, headers: dict):

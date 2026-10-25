@@ -36,10 +36,40 @@ from src.services.catalog_checkpoint import (
 from src.services.flaresolverr import FlareSolverrClient
 from src.services.video_resolver import VideoResolver
 from src.services.mediaflow_bridge import resolve_with_mediaflow
+from src.services.resolvers.unpacker import unpack_js
 
 BASE_URL = "https://cuevana3i.cc"
 
 logger = logging.getLogger(__name__)
+
+
+async def _check_cdn_alive(m3u8_url: str) -> bool:
+    """Verifica si un URL m3u8 responde 200/206 en HEAD con timeout 10s."""
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
+            resp = await client.head(m3u8_url)
+            return resp.status_code in (200, 206)
+    except Exception:
+        return False
+
+
+def _unpack_eval_and_extract_m3u8(html: str) -> Optional[str]:
+    """Extrae URL .m3u8 de código JavaScript empaquetado eval(p,a,c,k,e,d)."""
+    # Intentar desempaquetar con unpack_js
+    try:
+        unpacked = unpack_js(html)
+        if unpacked != html:
+            # Buscar m3u8 en el código desempaquetado
+            m = re.search(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', unpacked)
+            if m:
+                return m.group(0)
+    except Exception:
+        pass
+    # Fallback: buscar directamente en el HTML original
+    m = re.search(r'https?://[^\s"\'<>]+\.m3u8[^\s"\'<>]*', html)
+    if m:
+        return m.group(0)
+    return None
 
 
 class CatalogCrawlError(RuntimeError):
@@ -716,6 +746,36 @@ class Cuevana3Adapter(MediaProvider):
                     return mf_result
             except Exception as e:
                 logger.debug("mediaflow_bridge falló para %s: %s", candidate, e)
+
+        # FlareSolverr + Unpack para dominios conocidos con Cloudflare + eval empaquetado
+        _FLARE_UNPACK_DOMAINS = {
+            "streamwish.to", "streamwish.com", "ajmidyad.sbs",
+            "vimeos.net",
+            "bysejikuar.com",
+            "vidhide.com", "vidhidepro.com",
+            "filelions.to", "filelions.com",
+            "voe.sx", "voe-unblock.com", "voeunblock.com", "voeunbl0ck.com", "voeunblocker.com",
+        }
+
+        candidate_domain = urlparse(server_url).hostname or ""
+        base_domain = ".".join(candidate_domain.split(".")[-2:]) if candidate_domain.count(".") >= 1 else candidate_domain
+
+        if candidate_domain in _FLARE_UNPACK_DOMAINS or base_domain in _FLARE_UNPACK_DOMAINS:
+            try:
+                flaresolverr = FlareSolverrClient()
+                solution = await asyncio.to_thread(
+                    flaresolverr.get_solution,
+                    server_url,
+                    max_timeout=60000,
+                )
+                if solution and solution.get("response"):
+                    html = solution["response"]
+                    m3u8_url = _unpack_eval_and_extract_m3u8(html)
+                    if m3u8_url:
+                        if await _check_cdn_alive(m3u8_url):
+                            return PlaybackDescriptor(protocol="hls", url=m3u8_url, headers={})
+            except Exception as e:
+                logger.debug("FlareSolverr+unpack falló para %s: %s", server_url, e)
 
         # Fallback a resolvers custom
         if VideoResolver.is_doodstream(server_url):
