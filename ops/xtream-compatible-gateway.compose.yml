@@ -1,0 +1,41 @@
+services:
+  xtream-upstream-proxy:
+    image: nginx:1.27-alpine
+    container_name: xtream-upstream-proxy
+    restart: unless-stopped
+    volumes:
+      - /opt/xtream-upstream-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /opt/xtream-upstream-proxy/data:/srv/epg:ro
+    networks:
+      - iptv
+
+  xtream-compatible-gateway:
+    image: iptv-proxy-stream-gateway
+    container_name: xtream-compatible-gateway
+    restart: unless-stopped
+    env_file:
+      - /opt/iptv-proxy/.env
+    environment:
+      UPSTREAM_BASE: http://xtream-upstream-proxy:8080
+      XTREAM_BASE_URL: http://xtream-upstream-proxy:8080
+      XTREAM_USER: bridge
+      XTREAM_PASSWORD: bridge
+      EPG_ACTIVE_ENABLED: "false"
+      API_CACHE_TTL: "900"
+      MEDIA_METADATA_GRACE_SECONDS: "0"
+      METADATA_CACHE_MAX_BYTES: "268435456"
+      METADATA_CACHE_MAX_ITEM_BYTES: "134217728"
+      NO_PROXY: localhost,127.0.0.1,xtream-upstream-proxy
+      no_proxy: localhost,127.0.0.1,xtream-upstream-proxy
+    ports:
+      - "9193:8080"
+    depends_on:
+      - xtream-upstream-proxy
+    networks:
+      - iptv
+    init: true
+
+networks:
+  iptv:
+    external: true
+    name: iptv-proxy_default

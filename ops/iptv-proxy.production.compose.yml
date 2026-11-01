@@ -1,0 +1,136 @@
+services:
+  warp-egress:
+    image: alpine/socat:1.8.0.3
+    container_name: iptv-warp-egress
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - TCP-LISTEN:41080,bind=172.29.0.1,fork,reuseaddr
+      - TCP:127.0.0.1:40000
+
+  vpnbook-http-proxy:
+    build:
+      context: ./vpnbook-http-proxy
+    container_name: iptv-vpnbook-http-proxy
+    restart: unless-stopped
+    depends_on:
+      - warp-egress
+    extra_hosts:
+      - warp-host:172.29.0.1
+    expose:
+      - "8118"
+
+  iptv-proxy:
+    image: ghcr.io/wireshj/iptv-proxy:latest
+    container_name: iptv-proxy
+    restart: unless-stopped
+    expose:
+      - "9191"
+    env_file:
+      - .env
+    environment:
+      HTTP_PROXY: http://vpnbook-http-proxy:8118
+      HTTPS_PROXY: http://vpnbook-http-proxy:8118
+      NO_PROXY: localhost,127.0.0.1,iptv-proxy,stream-gateway,mobile-gateway
+    depends_on:
+      - vpnbook-http-proxy
+
+  stream-gateway:
+    build:
+      context: ./gateway
+    container_name: iptv-stream-gateway
+    restart: unless-stopped
+    ports:
+      - "9191:8080"
+    environment:
+      UPSTREAM_BASE: http://xtream-upstream-proxy:8080
+      XTREAM_BASE_URL: http://xtream-upstream-proxy:8080
+      XTREAM_USER: bridge
+      XTREAM_PASSWORD: bridge
+      MAX_STREAMS: "2"
+      FFMPEG_LOGLEVEL: warning
+      API_CACHE_TTL: "900"
+      EPG_CACHE_TTL: "21600"
+      EPG_ACTIVE_ENABLED: ${EPG_ACTIVE_ENABLED:-false}
+      EPG_ACTIVE_MANIFEST_PATH: ${EPG_ACTIVE_MANIFEST_PATH:-/etc/epg/active_manifest.json}
+      EPG_ACTIVE_SUPPLEMENTAL_XMLTV_PATH: ${EPG_ACTIVE_SUPPLEMENTAL_XMLTV_PATH:-/etc/epg/supplemental.xml.gz}
+      METADATA_CACHE_MAX_BYTES: "268435456"
+      METADATA_CACHE_MAX_ITEM_BYTES: "134217728"
+      MEDIA_METADATA_GRACE_SECONDS: "0"
+      MEDIA_TELEMETRY_INTERVAL_SECONDS: "15"
+      LIVE_RECONNECT_DELAY_SECONDS: "0.5"
+      LIVE_RECONNECT_DELAY_MAX_SECONDS: "8"
+      EGRESS_FAILURE_COOLDOWN_SECONDS: "30"
+      TAILNET_PUBLIC_HOST: codeserver.tail601d87.ts.net
+      TAILNET_PUBLIC_PORT: "9444"
+      TAILNET_PUBLIC_PROTOCOL: https
+      HTTP_PROXY: http://vpnbook-http-proxy:8118
+      HTTPS_PROXY: http://vpnbook-http-proxy:8118
+      http_proxy: http://vpnbook-http-proxy:8118
+      https_proxy: http://vpnbook-http-proxy:8118
+      NO_PROXY: localhost,127.0.0.1,iptv-proxy,stream-gateway,mobile-gateway,xtream-upstream-proxy
+      no_proxy: localhost,127.0.0.1,iptv-proxy,stream-gateway,mobile-gateway,xtream-upstream-proxy
+    env_file:
+      - .env
+    volumes:
+      - ${EPG_ACTIVE_HOST_DIR:-./epg}:/etc/epg:ro
+    depends_on:
+      - iptv-proxy
+      - vpnbook-http-proxy
+    init: true
+
+  mobile-gateway:
+    build:
+      context: ./gateway
+    container_name: iptv-mobile-gateway
+    restart: unless-stopped
+    ports:
+      - "9192:8081"
+    environment:
+      HTTP_PROXY: http://vpnbook-http-proxy:8118
+      HTTPS_PROXY: http://vpnbook-http-proxy:8118
+      http_proxy: http://vpnbook-http-proxy:8118
+      https_proxy: http://vpnbook-http-proxy:8118
+      NO_PROXY: localhost,127.0.0.1,iptv-proxy,stream-gateway,mobile-gateway
+      no_proxy: localhost,127.0.0.1,iptv-proxy,stream-gateway,mobile-gateway
+      UPSTREAM_BASE: http://stream-gateway:8080
+      MOBILE_HLS_ROOT: /tmp/mobile-hls
+      MOBILE_HLS_TIME: "4"
+      MOBILE_HLS_LIST_SIZE: "20"
+      MOBILE_HLS_DELETE_THRESHOLD: "300"
+      MOBILE_SESSION_IDLE_SECONDS: "1800"
+      MOBILE_VIDEO_BITRATE: 1200k
+      MOBILE_VIDEO_MAXRATE: 1400k
+      MOBILE_VIDEO_BUFSIZE: 2800k
+      MOBILE_AUDIO_BITRATE: 96k
+      MOBILE_FFMPEG_PRESET: veryfast
+      MOBILE_CLIENT_PROFILE: default
+      MOBILE_PUBLIC_HOST: codeserver.tail601d87.ts.net
+      MOBILE_PUBLIC_PORT: "9445"
+      MOBILE_PUBLIC_PROTOCOL: https
+      MOBILE_MOVIE_OUTPUT: hls
+      MOBILE_CLIENT_WRITE_TIMEOUT_SECONDS: "30"
+      MOBILE_LIVE_READ_TIMEOUT_SECONDS: "5"
+      MOBILE_LIVE_RECONNECT_AT_EOF: "1"
+      MOBILE_LIVE_DISCARD_CORRUPT: "1"
+      MOBILE_LIVE_WALLCLOCK_TIMESTAMPS: "1"
+      MOBILE_LIVE_RESEND_HEADERS: "1"
+      FFMPEG_LOGLEVEL: warning
+    env_file:
+      - .env
+    depends_on:
+      - stream-gateway
+      - vpnbook-http-proxy
+    tmpfs:
+      - /tmp/mobile-hls:size=512m,mode=0700
+    mem_limit: 2g
+    cpus: 2.0
+    init: true
+    command: ["python", "/app/mobile_gateway.py"]
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24
+          gateway: 172.29.0.1
